@@ -1,0 +1,811 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local localPlayer = Players.LocalPlayer
+local playerGui = localPlayer:WaitForChild("PlayerGui")
+local camera = Workspace.CurrentCamera
+
+if playerGui:FindFirstChild("MoshiGuiUI") then 
+	playerGui.MoshiGuiUI:Destroy() 
+end
+
+-- Create a secure container in Workspace for outlines so MM2 can't clear them
+local OutlineStorage = Workspace:FindFirstChild("MoshiOutlineStorage")
+if OutlineStorage then OutlineStorage:Destroy() end
+OutlineStorage = Instance.new("Folder")
+OutlineStorage.Name = "MoshiOutlineStorage"
+OutlineStorage.Parent = Workspace
+
+local espEnabled = false
+local gunEspEnabled = false
+local antiFlingEnabled = false
+local spectateEnabled = false
+local camLockEnabled = false
+
+local smoothnessLevel = 5
+local selectedPlayerName = ""
+local customWalkSpeed = 16
+
+local activeEsp = {}
+local activeOutlines = {}
+local droppedGunEspInstance = nil
+
+local function getPlayerRole(targetPlayer)
+	local character = targetPlayer.Character
+	local backpack = targetPlayer:FindFirstChild("Backpack")
+	
+	local hasKnife = (character and character:FindFirstChild("Knife")) or 
+	                 (backpack and backpack:FindFirstChild("Knife"))
+	                 
+	local hasGun = (character and character:FindFirstChild("Gun")) or 
+	               (backpack and backpack:FindFirstChild("Gun")) or
+	               (character and character:FindFirstChild("Revolver")) or
+	               (backpack and backpack:FindFirstChild("Revolver"))
+
+	if hasKnife then
+		return "Murderer", Color3.fromRGB(221, 29, 29)
+	elseif hasGun then
+		return "Sheriff", Color3.fromRGB(22, 120, 240)
+	end
+	
+	return "Innocent", Color3.fromRGB(62, 197, 32)
+end
+
+local function getMurderer()
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= localPlayer then
+			local role, _ = getPlayerRole(p)
+			if role == "Murderer" and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+				return p
+			end
+		end
+	end
+	return nil
+end
+
+local function applyEspTags(targetPlayer)
+	if targetPlayer == localPlayer then return end
+	
+	local function onCharAdded(character)
+		-- Give the game engine a brief moment to finish generating/teleporting the character
+		task.wait(0.5)
+		
+		local head = character:WaitForChild("Head", 5)
+		if not head then return end
+		
+		if activeEsp[targetPlayer] then pcall(function() activeEsp[targetPlayer]:Destroy() end) end
+		if activeOutlines[targetPlayer] then pcall(function() activeOutlines[targetPlayer]:Destroy() end) end
+		
+		local roleName, roleColor = getPlayerRole(targetPlayer)
+		
+		-- 1. Billboard Text Tag
+		local bGui = Instance.new("BillboardGui")
+		bGui.Name = targetPlayer.Name .. "_TagESP"
+		bGui.Size = UDim2.new(0, 150, 0, 30)
+		bGui.StudsOffset = Vector3.new(0, 3.2, 0) 
+		bGui.AlwaysOnTop = true
+		
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(1, 0, 1, 0)
+		label.BackgroundTransparency = 1
+		label.Font = Enum.Font.Code
+		label.TextSize = 11
+		label.TextStrokeTransparency = 0.5
+		label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+		
+		label.Text = string.format("%s\n[%s]", targetPlayer.Name:upper(), roleName)
+		label.TextColor3 = roleColor
+		label.Visible = espEnabled
+		
+		label.Parent = bGui
+		bGui.Parent = head
+		activeEsp[targetPlayer] = bGui
+		
+		-- 2. Outline Highlight (Housed in safe workspace storage)
+		local highlight = Instance.new("Highlight")
+		highlight.Name = targetPlayer.Name .. "_Outline"
+		highlight.FillTransparency = 1
+		highlight.OutlineTransparency = 0
+		highlight.OutlineColor = roleColor
+		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		highlight.Enabled = espEnabled
+		
+		highlight.Adornee = character -- Explicitly targets the body model safely
+		highlight.Parent = OutlineStorage
+		activeOutlines[targetPlayer] = highlight
+		
+		local connection
+		connection = RunService.RenderStepped:Connect(function()
+			if not character or not character.Parent or not bGui or not bGui.Parent or not highlight or not highlight.Parent then
+				if connection then connection:Disconnect() end
+				return
+			end
+			if espEnabled then
+				local currentRole, currentColor = getPlayerRole(targetPlayer)
+				label.Text = string.format("%s\n[%s]", targetPlayer.Name:upper(), currentRole)
+				label.TextColor3 = currentColor
+				
+				highlight.Adornee = character
+				highlight.OutlineColor = currentColor
+			end
+		end)
+	end
+	
+	if targetPlayer.Character then task.spawn(onCharAdded, targetPlayer.Character) end
+	targetPlayer.CharacterAdded:Connect(onCharAdded)
+end
+
+local function isHeldByPlayer(object)
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character and object:IsDescendantOf(player.Character) then
+			return true
+		end
+	end
+	return false
+end
+
+local function findDroppedGun()
+	for _, object in ipairs(Workspace:GetDescendants()) do
+		if object:IsA("Part") or object:IsA("MeshPart") then
+			if (object.Name == "GunDrop" or object.Name == "DroppedGun") and not isHeldByPlayer(object) then
+				return object
+			elseif object.Name == "Handle" and object.Parent:IsA("Tool") and (object.Parent.Name == "Gun" or object.Parent.Name == "Revolver") then
+				if not isHeldByPlayer(object) then
+					return object
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function updateDroppedGunEsp()
+	local gunTarget = findDroppedGun()
+	if gunTarget and gunEspEnabled then
+		if not droppedGunEspInstance or droppedGunEspInstance.Parent ~= gunTarget then
+			if droppedGunEspInstance then droppedGunEspInstance:Destroy() end
+			
+			droppedGunEspInstance = Instance.new("BillboardGui")
+			droppedGunEspInstance.Name = "DroppedGunESP"
+			droppedGunEspInstance.Size = UDim2.new(0, 120, 0, 25)
+			droppedGunEspInstance.StudsOffset = Vector3.new(0, 2, 0)
+			droppedGunEspInstance.AlwaysOnTop = true
+			
+			local label = Instance.new("TextLabel")
+			label.Size = UDim2.new(1, 0, 1, 0)
+			label.BackgroundTransparency = 1
+			label.Font = Enum.Font.Code
+			label.TextSize = 11
+			label.TextColor3 = Color3.fromRGB(255, 235, 40)
+			label.TextStrokeTransparency = 0.5
+			label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+			label.Text = "* DROPPED GUN *"
+			
+			label.Parent = droppedGunEspInstance
+			droppedGunEspInstance.Parent = gunTarget
+		end
+	else
+		if droppedGunEspInstance then
+			droppedGunEspInstance:Destroy()
+			droppedGunEspInstance = nil
+		end
+	end
+end
+
+local function findPartialPlayer(searchStr)
+	searchStr = searchStr:lower()
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= localPlayer and (p.Name:lower():sub(1, #searchStr) == searchStr or p.DisplayName:lower():sub(1, #searchStr) == searchStr) then
+			return p
+		end
+	end
+	return nil
+end
+
+local function safeTeleport(targetCFrame)
+	local char = localPlayer.Character
+	if not char then return end
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	
+	if hrp then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+	end
+	
+	char:PivotTo(targetCFrame)
+	
+	if humanoid then
+		humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+	end
+end
+
+RunService.RenderStepped:Connect(function()
+	if spectateEnabled and selectedPlayerName ~= "" then
+		local targetPlayer = Players:FindFirstChild(selectedPlayerName)
+		local targetChar = targetPlayer and targetPlayer.Character
+		local targetHumanoid = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
+		
+		if targetHumanoid then
+			camera.CameraSubject = targetHumanoid
+			return
+		end
+	end
+
+	if camLockEnabled then
+		local murderer = getMurderer()
+		local mudHrp = murderer and murderer.Character and murderer.Character:FindFirstChild("HumanoidRootPart")
+		
+		if mudHrp then
+			local targetLookCFrame = CFrame.lookAt(camera.CFrame.Position, mudHrp.Position)
+			local alphaFactor = math.clamp(1 / (smoothnessLevel * 2), 0.01, 1)
+			camera.CFrame = camera.CFrame:Lerp(targetLookCFrame, alphaFactor)
+		end
+	end
+end)
+
+RunService.Heartbeat:Connect(function()
+	updateDroppedGunEsp()
+	
+	local character = localPlayer.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if humanoid and humanoid.WalkSpeed ~= customWalkSpeed then
+		humanoid.WalkSpeed = customWalkSpeed
+	end
+
+	if not antiFlingEnabled then return end
+	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+	if hrp.AssemblyLinearVelocity.Magnitude > 45 then
+		hrp.AssemblyLinearVelocity = Vector3.new(0, hrp.AssemblyLinearVelocity.Y, 0)
+	end
+	if hrp.AssemblyAngularVelocity.Magnitude > 25 then
+		hrp.AssemblyAngularVelocity = Vector3.zero
+	end
+end)
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "MoshiGuiUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = playerGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 230, 0, 210) 
+MainFrame.Position = UDim2.new(0.5, -115, 0.4, -105)
+MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Visible = true
+MainFrame.Parent = ScreenGui
+
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = Color3.fromRGB(255, 255, 255)
+MainStroke.Thickness = 1
+MainStroke.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.BackgroundTransparency = 1
+Title.Text = "MOSHI GUI"
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Font = Enum.Font.Code
+Title.TextSize = 13
+Title.Parent = MainFrame
+
+local Container = Instance.new("ScrollingFrame")
+Container.Size = UDim2.new(1, -16, 1, -40)
+Container.Position = UDim2.new(0, 8, 0, 32)
+Container.BackgroundTransparency = 1
+Container.BorderSizePixel = 0
+Container.ScrollBarThickness = 3
+Container.ScrollBarImageColor3 = Color3.fromRGB(255, 255, 255)
+Container.CanvasSize = UDim2.new(0, 0, 0, 720)
+Container.Parent = MainFrame
+
+local UIListLayout = Instance.new("UIListLayout")
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+UIListLayout.Padding = UDim.new(0, 6)
+UIListLayout.Parent = Container
+
+local ToggleMenuBtn = Instance.new("TextButton")
+ToggleMenuBtn.Size = UDim2.new(0, 60, 0, 30)
+ToggleMenuBtn.Position = UDim2.new(0.05, 0, 0.25, 0)
+ToggleMenuBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+ToggleMenuBtn.Text = "MENU"
+ToggleMenuBtn.Font = Enum.Font.Code
+ToggleMenuBtn.TextSize = 11
+ToggleMenuBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleMenuBtn.Parent = ScreenGui
+
+local ToggleStroke = Instance.new("UIStroke")
+ToggleStroke.Color = Color3.fromRGB(255, 255, 255)
+ToggleStroke.Thickness = 1
+ToggleStroke.Parent = ToggleMenuBtn
+
+ToggleMenuBtn.MouseButton1Click:Connect(function()
+	MainFrame.Visible = not MainFrame.Visible
+end)
+
+local function createToggle(labelText, layoutOrder, callback)
+	local button = Instance.new("TextButton")
+	button.Size = UDim2.new(1, 0, 0, 30)
+	button.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	button.Text = labelText .. " [OFF]"
+	button.Font = Enum.Font.Code
+	button.TextSize = 10
+	button.TextColor3 = Color3.fromRGB(180, 180, 180)
+	button.LayoutOrder = layoutOrder
+	button.Parent = Container
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(50, 50, 50)
+	stroke.Thickness = 1
+	stroke.Parent = button
+
+	local state = false
+	button.MouseButton1Click:Connect(function()
+		state = not state
+		button.TextColor3 = state and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(180, 180, 180)
+		stroke.Color = state and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(50, 50, 50)
+		button.Text = labelText .. (state and " [ON]" or " [OFF]")
+		callback(state)
+	end)
+	return button, stroke
+end
+
+local function createActionButton(labelText, layoutOrder, callback)
+	local button = Instance.new("TextButton")
+	button.Size = UDim2.new(1, 0, 0, 30)
+	button.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	button.Text = labelText
+	button.Font = Enum.Font.Code
+	button.TextSize = 10
+	button.TextColor3 = Color3.fromRGB(255, 255, 255)
+	button.LayoutOrder = layoutOrder
+	button.Parent = Container
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(90, 90, 90)
+	stroke.Thickness = 1
+	stroke.Parent = button
+
+	button.MouseButton1Click:Connect(function() callback(button) end)
+end
+
+createToggle("ESP ROLE & OUTLINES", 1, function(state)
+	espEnabled = state
+	for _, gui in pairs(activeEsp) do
+		local label = gui:FindFirstChildOfClass("TextLabel")
+		if label then label.Visible = state end
+	end
+	for _, outline in pairs(activeOutlines) do
+		outline.Enabled = state
+	end
+end)
+createToggle("DROPPED GUN ESP", 2, function(state) gunEspEnabled = state end)
+createToggle("ANTI-FLING PROTECTION", 3, function(state) antiFlingEnabled = state end)
+
+local SpeedSectionLabel = Instance.new("TextLabel")
+SpeedSectionLabel.Size = UDim2.new(1, 0, 0, 18)
+SpeedSectionLabel.BackgroundTransparency = 1
+SpeedSectionLabel.Text = "─── MOVEMENT SPEED ───"
+SpeedSectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+SpeedSectionLabel.Font = Enum.Font.Code
+SpeedSectionLabel.TextSize = 9
+SpeedSectionLabel.LayoutOrder = 4
+SpeedSectionLabel.Parent = Container
+
+local SpeedInput = Instance.new("TextBox")
+SpeedInput.Size = UDim2.new(1, 0, 0, 30)
+SpeedInput.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+SpeedInput.PlaceholderText = "ENTER WALKSPEED (DEFAULT 16)..."
+SpeedInput.Font = Enum.Font.Code
+SpeedInput.TextSize = 9
+SpeedInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+SpeedInput.LayoutOrder = 5
+SpeedInput.Parent = Container
+Instance.new("UIStroke").Parent = SpeedInput
+
+local SpeedButton = Instance.new("TextButton")
+SpeedButton.Size = UDim2.new(1, 0, 0, 30)
+SpeedButton.BackgroundColor3 = Color3.fromRGB(20, 45, 20)
+SpeedButton.Text = "👟 UPDATE WALKSPEED"
+SpeedButton.Font = Enum.Font.Code
+SpeedButton.TextSize = 10
+SpeedButton.TextColor3 = Color3.fromRGB(150, 255, 150)
+SpeedButton.LayoutOrder = 6
+SpeedButton.Parent = Container
+Instance.new("UIStroke").Parent = SpeedButton
+
+SpeedButton.MouseButton1Click:Connect(function()
+	local numericVal = tonumber(SpeedInput.Text)
+	if numericVal and numericVal >= 0 then
+		customWalkSpeed = numericVal
+		SpeedButton.Text = "WALKSPEED SET TO: " .. tostring(numericVal)
+		task.delay(1.5, function() SpeedButton.Text = "👟 UPDATE WALKSPEED" end)
+	else
+		SpeedButton.Text = "INVALID NUMBER INPUT"
+		task.delay(1.5, function() SpeedButton.Text = "👟 UPDATE WALKSPEED" end)
+	end
+end)
+
+local CamLockSectionLabel = Instance.new("TextLabel")
+CamLockSectionLabel.Size = UDim2.new(1, 0, 0, 18)
+CamLockSectionLabel.BackgroundTransparency = 1
+CamLockSectionLabel.Text = "─── TRACKING & LOOK CAMERA ───"
+CamLockSectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+CamLockSectionLabel.Font = Enum.Font.Code
+CamLockSectionLabel.TextSize = 9
+CamLockSectionLabel.LayoutOrder = 7
+CamLockSectionLabel.Parent = Container
+
+createToggle("LOCK-ON MURDERER", 8, function(state)
+	camLockEnabled = state
+end)
+
+local SmoothCycleBtn = Instance.new("TextButton")
+SmoothCycleBtn.Size = UDim2.new(1, 0, 0, 30)
+SmoothCycleBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 35)
+SmoothCycleBtn.Text = "TRACKING SMOOTHNESS: " .. tostring(smoothnessLevel)
+SmoothCycleBtn.Font = Enum.Font.Code
+SmoothCycleBtn.TextSize = 10
+SmoothCycleBtn.TextColor3 = Color3.fromRGB(160, 160, 255)
+SmoothCycleBtn.LayoutOrder = 9
+SmoothCycleBtn.Parent = Container
+local SmoothStroke = Instance.new("UIStroke")
+SmoothStroke.Color = Color3.fromRGB(70, 70, 120)
+SmoothStroke.Parent = SmoothCycleBtn
+
+SmoothCycleBtn.MouseButton1Click:Connect(function()
+	smoothnessLevel = smoothnessLevel + 1
+	if smoothnessLevel > 10 then smoothnessLevel = 1 end
+	SmoothCycleBtn.Text = "TRACKING SMOOTHNESS: " .. tostring(smoothnessLevel)
+end)
+
+local UtilitySectionLabel = Instance.new("TextLabel")
+UtilitySectionLabel.Size = UDim2.new(1, 0, 0, 18)
+UtilitySectionLabel.BackgroundTransparency = 1
+UtilitySectionLabel.Text = "─── UTILITIES & RADAR ───"
+UtilitySectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+UtilitySectionLabel.Font = Enum.Font.Code
+UtilitySectionLabel.TextSize = 9
+UtilitySectionLabel.LayoutOrder = 10
+UtilitySectionLabel.Parent = Container
+
+createActionButton("TELEPORT TO GUN", 11, function(btn)
+	local gunPart = findDroppedGun()
+	if not gunPart then
+		btn.Text = "THE GUN IS NOT DROPPED"
+		btn.TextColor3 = Color3.fromRGB(221, 29, 29)
+		task.delay(2, function() btn.Text = "TELEPORT TO GUN" btn.TextColor3 = Color3.fromRGB(255, 255, 255) end)
+		return
+	end
+	
+	local myHrp = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if myHrp and gunPart then
+		local orig = myHrp.CFrame
+		safeTeleport(gunPart.CFrame * CFrame.new(0, 1, 0))
+		btn.Text = "GUN ACQUIRED!"
+		task.wait(0.3)
+		safeTeleport(orig)
+		btn.Text = "RETURNED TO SAFETY"
+		task.delay(1.5, function() btn.Text = "TELEPORT TO GUN" end)
+	end
+end)
+
+local WorldSectionLabel = Instance.new("TextLabel")
+WorldSectionLabel.Size = UDim2.new(1, 0, 0, 18)
+WorldSectionLabel.BackgroundTransparency = 1
+WorldSectionLabel.Text = "─── WORLD TELEPORTS ───"
+WorldSectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+WorldSectionLabel.Font = Enum.Font.Code
+WorldSectionLabel.TextSize = 9
+WorldSectionLabel.LayoutOrder = 11
+WorldSectionLabel.Parent = Container
+
+createActionButton("TELEPORT TO LOBBY", 11.1, function(btn)
+	local lobbyTarget = Workspace:FindFirstChild("RegularLobby") or Workspace:FindFirstChild("Lobby") or Workspace:FindFirstChild("LobbySpawn")
+	if not lobbyTarget then
+		for _, obj in ipairs(Workspace:GetDescendants()) do
+			if obj:IsA("SpawnLocation") and (obj.Name:lower():find("lobby") or obj.Name == "SpawnLocation") then
+				lobbyTarget = obj
+				break
+			end
+		end
+	end
+	
+	if lobbyTarget then
+		local landingCFrame
+		if lobbyTarget:IsA("Model") then
+			local primary = lobbyTarget.PrimaryPart or lobbyTarget:FindFirstChildWhichIsA("BasePart", true)
+			if primary then landingCFrame = primary.CFrame * CFrame.new(0, 4, 0) end
+		else
+			landingCFrame = lobbyTarget.CFrame * CFrame.new(0, 4, 0)
+		end
+		
+		if landingCFrame then
+			safeTeleport(landingCFrame)
+			btn.Text = "TP'D TO LOBBY!"
+			task.delay(1.5, function() btn.Text = "TELEPORT TO LOBBY" end)
+		else
+			btn.Text = "COULD NOT POSITION LOBBY"
+			task.delay(1.5, function() btn.Text = "TELEPORT TO LOBBY" end)
+		end
+	else
+		btn.Text = "LOBBY SPAWN NOT FOUND"
+		task.delay(1.5, function() btn.Text = "TELEPORT TO LOBBY" end)
+	end
+end)
+
+createActionButton("TELEPORT TO ACTIVE MAP", 11.2, function(btn)
+	local mapContainer = Workspace:FindFirstChild("Normal") or Workspace:FindFirstChild("Map") or Workspace:FindFirstChild("Maps")
+	local activeMap = nil
+	
+	if mapContainer then
+		for _, child in ipairs(mapContainer:GetChildren()) do
+			if child:IsA("Model") and child.Name ~= "RegularLobby" and child.Name ~= "Lobby" then
+				activeMap = child
+				break
+			end
+		end
+	end
+	
+	if not activeMap then
+		for _, obj in ipairs(Workspace:GetChildren()) do
+			if obj:IsA("Model") and obj.Name ~= "Lobby" and obj.Name ~= "The Lobby" and obj.Name ~= "RegularLobby" and not Players:GetPlayerFromCharacter(obj) then
+				if obj:FindFirstChild("Spawns") or obj:FindFirstChild("CoinContainer") or obj:FindFirstChild("Geometry") then
+					activeMap = obj
+					break
+				end
+			end
+		end
+	end
+	
+	if activeMap then
+		local spawnLocation = activeMap:FindFirstChild("Spawns", true) or activeMap:FindFirstChild("Spawn", true)
+		local targetPart = spawnLocation and spawnLocation:FindFirstChildWhichIsA("BasePart", true) or activeMap:FindFirstChildWhichIsA("BasePart", true)
+		
+		if targetPart then
+			safeTeleport(targetPart.CFrame * CFrame.new(0, 4, 0))
+			btn.Text = "TP'D TO: " .. activeMap.Name:upper()
+			task.delay(1.5, function() btn.Text = "TELEPORT TO ACTIVE MAP" end)
+		else
+			btn.Text = "NO SPAWN PARTS FOUND"
+			task.delay(1.5, function() btn.Text = "TELEPORT TO ACTIVE MAP" end)
+		end
+	else
+		btn.Text = "NO ACTIVE MAP ACTIVE"
+		task.delay(1.5, function() btn.Text = "TELEPORT TO ACTIVE MAP" end)
+	end
+end)
+
+local PlayerSectionLabel = Instance.new("TextLabel")
+PlayerSectionLabel.Size = UDim2.new(1, 0, 0, 18)
+PlayerSectionLabel.BackgroundTransparency = 1
+PlayerSectionLabel.Text = "─── PLAYER TELEPORTS & WATCH ───"
+PlayerSectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+PlayerSectionLabel.Font = Enum.Font.Code
+PlayerSectionLabel.TextSize = 9
+PlayerSectionLabel.LayoutOrder = 12
+PlayerSectionLabel.Parent = Container
+
+local SelectorButton = Instance.new("TextButton")
+local DropdownFrame = Instance.new("Frame")
+local DropdownScroll = Instance.new("ScrollingFrame")
+local DropdownList = Instance.new("UIListLayout")
+
+SelectorButton.Size = UDim2.new(1, 0, 0, 30)
+SelectorButton.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+SelectorButton.Text = "SELECT PLAYER: [NONE]"
+SelectorButton.Font = Enum.Font.Code
+SelectorButton.TextSize = 9
+SelectorButton.TextColor3 = Color3.fromRGB(255, 255, 100)
+SelectorButton.LayoutOrder = 13
+SelectorButton.Parent = Container
+Instance.new("UIStroke").Parent = SelectorButton
+
+DropdownFrame.Size = UDim2.new(1, 0, 0, 85)
+DropdownFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+DropdownFrame.Visible = false
+DropdownFrame.LayoutOrder = 14
+DropdownFrame.Parent = Container
+Instance.new("UIStroke").Parent = DropdownFrame
+
+DropdownScroll.Size = UDim2.new(1, -6, 1, -6)
+DropdownScroll.Position = UDim2.new(0, 3, 0, 3)
+DropdownScroll.BackgroundTransparency = 1
+DropdownScroll.ScrollBarThickness = 3
+DropdownScroll.Parent = DropdownFrame
+DropdownList.Padding = UDim.new(0, 4)
+DropdownList.Parent = DropdownScroll
+
+local SpecToggleBtn, SpecToggleStroke
+
+local function updateDropdownList()
+	for _, child in ipairs(DropdownScroll:GetChildren()) do if child:IsA("TextButton") then child:Destroy() end end
+	local refreshAction = Instance.new("TextButton")
+	refreshAction.Size = UDim2.new(1, -6, 0, 22)
+	refreshAction.BackgroundColor3 = Color3.fromRGB(35, 60, 35)
+	refreshAction.Text = "🔄 REFRESH PLAYER LIST"
+	refreshAction.Font = Enum.Font.Code
+	refreshAction.TextSize = 9
+	refreshAction.TextColor3 = Color3.fromRGB(150, 255, 150)
+	refreshAction.Parent = DropdownScroll
+	refreshAction.MouseButton1Click:Connect(updateDropdownList)
+
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= localPlayer then
+			local pBtn = Instance.new("TextButton")
+			pBtn.Size = UDim2.new(1, -6, 0, 22)
+			pBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+			pBtn.Text = p.Name:upper()
+			pBtn.Font = Enum.Font.Code
+			pBtn.TextSize = 9
+			pBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
+			pBtn.Parent = DropdownScroll
+			pBtn.MouseButton1Click:Connect(function()
+				selectedPlayerName = p.Name
+				SelectorButton.Text = "TARGET: " .. p.Name:upper()
+				DropdownFrame.Visible = false
+				
+				if spectateEnabled then
+					spectateEnabled = false
+					if SpecToggleBtn and SpecToggleStroke then
+						SpecToggleBtn.Text = "SPECTATE PLAYER [OFF]"
+						SpecToggleBtn.TextColor3 = Color3.fromRGB(180, 180, 180)
+						SpecToggleStroke.Color = Color3.fromRGB(50, 50, 50)
+					end
+				end
+			end)
+		end
+	end
+	DropdownScroll.CanvasSize = UDim2.new(0, 0, 0, DropdownList.AbsoluteContentSize.Y + 10)
+end
+
+SelectorButton.MouseButton1Click:Connect(function()
+	DropdownFrame.Visible = not DropdownFrame.Visible
+	if DropdownFrame.Visible then updateDropdownList() end
+end)
+
+SpecToggleBtn, SpecToggleStroke = createToggle("SPECTATE PLAYER", 15, function(state)
+	if selectedPlayerName == "" and state == true then
+		spectateEnabled = false
+		SpecToggleBtn.Text = "SELECT A PLAYER FIRST"
+		SpecToggleBtn.TextColor3 = Color3.fromRGB(221, 29, 29)
+		SpecToggleStroke.Color = Color3.fromRGB(221, 29, 29)
+		task.delay(1.5, function()
+			SpecToggleBtn.Text = "SPECTATE PLAYER [OFF]"
+			SpecToggleBtn.TextColor3 = Color3.fromRGB(180, 180, 180)
+			SpecToggleStroke.Color = Color3.fromRGB(50, 50, 50)
+		end)
+		return
+	end
+	spectateEnabled = state
+	if not state then
+		local myChar = localPlayer.Character
+		local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
+		if myHumanoid then
+			camera.CameraSubject = myHumanoid
+		end
+	end
+end)
+
+createActionButton("TELEPORT TO SELECTED PLAYER", 16, function(btn)
+	local targetPlayer = Players:FindFirstChild(selectedPlayerName)
+	local targetHrp = targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if targetHrp then
+		safeTeleport(targetHrp.CFrame * CFrame.new(0, 0, 3))
+		btn.Text = "TP'D TO " .. targetPlayer.Name:upper()
+		task.delay(1.5, function() btn.Text = "TELEPORT TO SELECTED PLAYER" end)
+	end
+end)
+
+local FlingSectionLabel = Instance.new("TextLabel")
+FlingSectionLabel.Size = UDim2.new(1, 0, 0, 18)
+FlingSectionLabel.BackgroundTransparency = 1
+FlingSectionLabel.Text = "─── TARGET FLING ───"
+FlingSectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
+FlingSectionLabel.Font = Enum.Font.Code
+FlingSectionLabel.TextSize = 9
+FlingSectionLabel.LayoutOrder = 17
+FlingSectionLabel.Parent = Container
+
+local FlingInput = Instance.new("TextBox")
+FlingInput.Size = UDim2.new(1, 0, 0, 30)
+FlingInput.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+FlingInput.PlaceholderText = "TYPE USERNAME TO FLING..."
+FlingInput.Font = Enum.Font.Code
+FlingInput.TextSize = 9
+FlingInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+FlingInput.LayoutOrder = 18
+FlingInput.Parent = Container
+Instance.new("UIStroke").Parent = FlingInput
+
+local FlingButton = Instance.new("TextButton")
+FlingButton.Size = UDim2.new(1, 0, 0, 30)
+FlingButton.BackgroundColor3 = Color3.fromRGB(50, 20, 20)
+FlingButton.Text = "⚡ EXECUTE FLING"
+FlingButton.Font = Enum.Font.Code
+FlingButton.TextSize = 10
+FlingButton.TextColor3 = Color3.fromRGB(255, 150, 150)
+FlingButton.LayoutOrder = 19
+FlingButton.Parent = Container
+Instance.new("UIStroke").Parent = FlingButton
+
+FlingButton.MouseButton1Click:Connect(function()
+	if antiFlingEnabled then FlingButton.Text = "DISABLE ANTI-FLING FIRST" return end
+	local targetPlayer = findPartialPlayer(FlingInput.Text)
+	if not targetPlayer or not targetPlayer.Character then FlingButton.Text = "PLAYER NOT FOUND" return end
+
+	local myChar = localPlayer.Character
+	local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
+	local targetHrp = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+
+	if myHrp and targetHrp then
+		FlingButton.Text = "FLINGING..."
+		local originalPos = myHrp.CFrame
+		local duration = 0.65 
+		local start = os.clock()
+		
+		local flingConnection
+		flingConnection = RunService.Heartbeat:Connect(function()
+			pcall(function()
+				if os.clock() - start > duration or not myHrp or not targetHrp then
+					flingConnection:Disconnect()
+					
+					myHrp.AssemblyLinearVelocity = Vector3.zero
+					myHrp.AssemblyAngularVelocity = Vector3.zero
+					myChar:PivotTo(originalPos)
+					FlingButton.Text = "⚡ EXECUTE FLING"
+					return
+				end
+				
+				for _, part in ipairs(myChar:GetDescendants()) do
+					if part:IsA("BasePart") then part.CanCollide = false end
+				end
+				
+				local syncTime = os.clock() * 60
+				local positionalOffset = Vector3.new(math.sin(syncTime) * 0.2, 0, math.cos(syncTime) * 0.2)
+				
+				myChar:PivotTo(CFrame.new(targetHrp.Position + positionalOffset))
+				
+				myHrp.AssemblyAngularVelocity = Vector3.new(0, 24000, 0)
+				myHrp.AssemblyLinearVelocity = Vector3.new(24000, 24000, 24000)
+			end)
+		end)
+	end
+end)
+
+task.spawn(function()
+	Players.PlayerAdded:Connect(updateDropdownList)
+	Players.PlayerRemoving:Connect(function(player)
+		if player.Name == selectedPlayerName then 
+			selectedPlayerName = "" 
+			SelectorButton.Text = "SELECT PLAYER: [NONE]" 
+			spectateEnabled = false
+		end
+		if activeEsp[player] then pcall(function() activeEsp[player]:Destroy() end) activeEsp[player] = nil end
+		if activeOutlines[player] then pcall(function() activeOutlines[player]:Destroy() end) activeOutlines[player] = nil end
+		updateDropdownList()
+	end)
+	for _, p in ipairs(Players:GetPlayers()) do applyEspTags(p) end
+	Players.PlayerAdded:Connect(applyEspTags)
+end)
+
+local dragToggle, dragStart, startPos
+MainFrame.InputBegan:Connect(function(input)
+	if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+		dragToggle = true dragStart = input.Position startPos = MainFrame.Position
+		input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragToggle = false end end)
+	end
+end)
+MainFrame.InputChanged:Connect(function(input)
+	if dragToggle and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+		local delta = input.Position - dragStart
+		MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+	end
+end)
+
+print("[MOSHI GUI] Persistent Outlines Patched.")
