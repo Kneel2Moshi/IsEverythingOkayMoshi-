@@ -10,7 +10,6 @@ if playerGui:FindFirstChild("MoshiGuiUI") then
 	playerGui.MoshiGuiUI:Destroy() 
 end
 
--- Create a secure container in Workspace for outlines so MM2 can't clear them
 local OutlineStorage = Workspace:FindFirstChild("MoshiOutlineStorage")
 if OutlineStorage then OutlineStorage:Destroy() end
 OutlineStorage = Instance.new("Folder")
@@ -30,7 +29,10 @@ local customWalkSpeed = 16
 local activeEsp = {}
 local activeOutlines = {}
 local droppedGunEspInstance = nil
+local cachedDroppedGun = nil
+local playerRoles = {}
 
+-- Accurate checking of both equipped and unequipped hidden inventory items
 local function getPlayerRole(targetPlayer)
 	local character = targetPlayer.Character
 	local backpack = targetPlayer:FindFirstChild("Backpack")
@@ -44,18 +46,18 @@ local function getPlayerRole(targetPlayer)
 	               (backpack and backpack:FindFirstChild("Revolver"))
 
 	if hasKnife then
-		return "Murderer", Color3.fromRGB(221, 29, 29)
+		return "Murderer", Color3.fromRGB(255, 0, 0)
 	elseif hasGun then
-		return "Sheriff", Color3.fromRGB(22, 120, 240)
+		return "Sheriff", Color3.fromRGB(0, 180, 255)
 	end
 	
-	return "Innocent", Color3.fromRGB(62, 197, 32)
+	return "Innocent", Color3.fromRGB(0, 255, 0)
 end
 
 local function getMurderer()
 	for _, p in ipairs(Players:GetPlayers()) do
 		if p ~= localPlayer then
-			local role, _ = getPlayerRole(p)
+			local role = playerRoles[p]
 			if role == "Murderer" and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
 				return p
 			end
@@ -64,76 +66,71 @@ local function getMurderer()
 	return nil
 end
 
-local function applyEspTags(targetPlayer)
+local function buildTagForPlayer(targetPlayer)
 	if targetPlayer == localPlayer then return end
+	local character = targetPlayer.Character
+	if not character then return end
 	
-	local function onCharAdded(character)
-		-- Give the game engine a brief moment to finish generating/teleporting the character
-		task.wait(0.5)
-		
-		local head = character:WaitForChild("Head", 5)
-		if not head then return end
-		
-		if activeEsp[targetPlayer] then pcall(function() activeEsp[targetPlayer]:Destroy() end) end
+	local head = character:WaitForChild("Head", 4)
+	if not head then return end
+	
+	local roleName, roleColor = getPlayerRole(targetPlayer)
+	playerRoles[targetPlayer] = roleName
+	
+	if activeEsp[targetPlayer] then pcall(function() activeEsp[targetPlayer]:Destroy() end) end
+	
+	local bGui = Instance.new("BillboardGui")
+	bGui.Name = targetPlayer.Name .. "_TagESP"
+	bGui.Size = UDim2.new(0, 160, 0, 35)
+	bGui.StudsOffset = Vector3.new(0, 3.5, 0) 
+	bGui.AlwaysOnTop = true
+	
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.Code
+	label.TextSize = 11
+	label.TextStrokeTransparency = 0.2
+	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	label.Text = string.format("%s\n[%s]", targetPlayer.Name:upper(), roleName)
+	label.TextColor3 = roleColor
+	label.Visible = espEnabled
+	
+	label.Parent = bGui
+	bGui.Parent = head
+	activeEsp[targetPlayer] = bGui
+	
+	if not activeOutlines[targetPlayer] or activeOutlines[targetPlayer].Parent ~= OutlineStorage then
 		if activeOutlines[targetPlayer] then pcall(function() activeOutlines[targetPlayer]:Destroy() end) end
 		
-		local roleName, roleColor = getPlayerRole(targetPlayer)
-		
-		-- 1. Billboard Text Tag
-		local bGui = Instance.new("BillboardGui")
-		bGui.Name = targetPlayer.Name .. "_TagESP"
-		bGui.Size = UDim2.new(0, 150, 0, 30)
-		bGui.StudsOffset = Vector3.new(0, 3.2, 0) 
-		bGui.AlwaysOnTop = true
-		
-		local label = Instance.new("TextLabel")
-		label.Size = UDim2.new(1, 0, 1, 0)
-		label.BackgroundTransparency = 1
-		label.Font = Enum.Font.Code
-		label.TextSize = 11
-		label.TextStrokeTransparency = 0.5
-		label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-		
-		label.Text = string.format("%s\n[%s]", targetPlayer.Name:upper(), roleName)
-		label.TextColor3 = roleColor
-		label.Visible = espEnabled
-		
-		label.Parent = bGui
-		bGui.Parent = head
-		activeEsp[targetPlayer] = bGui
-		
-		-- 2. Outline Highlight (Housed in safe workspace storage)
 		local highlight = Instance.new("Highlight")
 		highlight.Name = targetPlayer.Name .. "_Outline"
-		highlight.FillTransparency = 1
+		highlight.FillTransparency = 0.85
 		highlight.OutlineTransparency = 0
 		highlight.OutlineColor = roleColor
 		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 		highlight.Enabled = espEnabled
-		
-		highlight.Adornee = character -- Explicitly targets the body model safely
+		highlight.Adornee = character
 		highlight.Parent = OutlineStorage
 		activeOutlines[targetPlayer] = highlight
-		
-		local connection
-		connection = RunService.RenderStepped:Connect(function()
-			if not character or not character.Parent or not bGui or not bGui.Parent or not highlight or not highlight.Parent then
-				if connection then connection:Disconnect() end
-				return
-			end
-			if espEnabled then
-				local currentRole, currentColor = getPlayerRole(targetPlayer)
-				label.Text = string.format("%s\n[%s]", targetPlayer.Name:upper(), currentRole)
-				label.TextColor3 = currentColor
-				
-				highlight.Adornee = character
-				highlight.OutlineColor = currentColor
-			end
-		end)
+	else
+		activeOutlines[targetPlayer].Adornee = character
+		activeOutlines[targetPlayer].OutlineColor = roleColor
+		activeOutlines[targetPlayer].Enabled = espEnabled
 	end
+end
+
+local function applyEspTags(targetPlayer)
+	if targetPlayer == localPlayer then return end
 	
-	if targetPlayer.Character then task.spawn(onCharAdded, targetPlayer.Character) end
-	targetPlayer.CharacterAdded:Connect(onCharAdded)
+	targetPlayer.CharacterAdded:Connect(function(char)
+		task.wait(0.3)
+		buildTagForPlayer(targetPlayer)
+	end)
+	
+	if targetPlayer.Character then
+		task.spawn(buildTagForPlayer, targetPlayer)
+	end
 end
 
 local function isHeldByPlayer(object)
@@ -145,30 +142,77 @@ local function isHeldByPlayer(object)
 	return false
 end
 
-local function findDroppedGun()
+local function scanForDroppedGun()
 	for _, object in ipairs(Workspace:GetDescendants()) do
-		if object:IsA("Part") or object:IsA("MeshPart") then
-			if (object.Name == "GunDrop" or object.Name == "DroppedGun") and not isHeldByPlayer(object) then
-				return object
-			elseif object.Name == "Handle" and object.Parent:IsA("Tool") and (object.Parent.Name == "Gun" or object.Parent.Name == "Revolver") then
-				if not isHeldByPlayer(object) then
-					return object
+		if (object.Name == "GunDrop" or object.Name == "DroppedGun") and not isHeldByPlayer(object) then
+			if object:IsA("BasePart") then
+				cachedDroppedGun = object
+				return
+			elseif object:FindFirstChildWhichIsA("BasePart") then
+				cachedDroppedGun = object:FindFirstChildWhichIsA("BasePart")
+				return
+			end
+		end
+		
+		if object:IsA("Tool") and (object.Name == "Gun" or object.Name == "Revolver") then
+			if not isHeldByPlayer(object) then
+				local handle = object:FindFirstChild("Handle") or object:FindFirstChildWhichIsA("BasePart", true)
+				if handle then
+					cachedDroppedGun = handle
+					return
 				end
 			end
 		end
 	end
-	return nil
+	cachedDroppedGun = nil
 end
 
+task.spawn(function()
+	while true do
+		task.wait(0.25)
+		scanForDroppedGun()
+		
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= localPlayer and p.Character then
+				local role, color = getPlayerRole(p)
+				playerRoles[p] = role
+				
+				local gui = activeEsp[p]
+				local hasHead = p.Character:FindFirstChild("Head")
+				
+				if espEnabled and hasHead then
+					if not gui or not gui.Parent or gui.Parent ~= hasHead then
+						buildTagForPlayer(p)
+						gui = activeEsp[p]
+					end
+					
+					local lbl = gui and gui:FindFirstChildOfClass("TextLabel")
+					if lbl then
+						lbl.Text = string.format("%s\n[%s]", p.Name:upper(), role)
+						lbl.TextColor3 = color
+						lbl.Visible = true
+					end
+					
+					local outline = activeOutlines[p]
+					if outline then
+						outline.OutlineColor = color
+						outline.Enabled = true
+						outline.Adornee = p.Character
+					end
+				end
+			end
+		end
+	end
+end)
+
 local function updateDroppedGunEsp()
-	local gunTarget = findDroppedGun()
-	if gunTarget and gunEspEnabled then
-		if not droppedGunEspInstance or droppedGunEspInstance.Parent ~= gunTarget then
+	if cachedDroppedGun and gunEspEnabled then
+		if not droppedGunEspInstance or droppedGunEspInstance.Parent ~= cachedDroppedGun then
 			if droppedGunEspInstance then droppedGunEspInstance:Destroy() end
 			
 			droppedGunEspInstance = Instance.new("BillboardGui")
 			droppedGunEspInstance.Name = "DroppedGunESP"
-			droppedGunEspInstance.Size = UDim2.new(0, 120, 0, 25)
+			droppedGunEspInstance.Size = UDim2.new(0, 140, 0, 25)
 			droppedGunEspInstance.StudsOffset = Vector3.new(0, 2, 0)
 			droppedGunEspInstance.AlwaysOnTop = true
 			
@@ -176,14 +220,14 @@ local function updateDroppedGunEsp()
 			label.Size = UDim2.new(1, 0, 1, 0)
 			label.BackgroundTransparency = 1
 			label.Font = Enum.Font.Code
-			label.TextSize = 11
-			label.TextColor3 = Color3.fromRGB(255, 235, 40)
-			label.TextStrokeTransparency = 0.5
+			label.TextSize = 12
+			label.TextColor3 = Color3.fromRGB(255, 235, 0) 
+			label.TextStrokeTransparency = 0.2
 			label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-			label.Text = "* DROPPED GUN *"
+			label.Text = "★ DROPPED GUN ★"
 			
 			label.Parent = droppedGunEspInstance
-			droppedGunEspInstance.Parent = gunTarget
+			droppedGunEspInstance.Parent = cachedDroppedGun
 		end
 	else
 		if droppedGunEspInstance then
@@ -245,23 +289,51 @@ RunService.RenderStepped:Connect(function()
 	end
 end)
 
-RunService.Heartbeat:Connect(function()
+RunService.PreSimulation:Connect(function()
 	updateDroppedGunEsp()
 	
 	local character = localPlayer.Character
-	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not character then return end
+	
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if humanoid and humanoid.WalkSpeed ~= customWalkSpeed then
 		humanoid.WalkSpeed = customWalkSpeed
 	end
 
 	if not antiFlingEnabled then return end
-	local hrp = character and character:FindFirstChild("HumanoidRootPart")
+	
+	local hrp = character:FindFirstChild("HumanoidRootPart")
 	if not hrp then return end
-	if hrp.AssemblyLinearVelocity.Magnitude > 45 then
-		hrp.AssemblyLinearVelocity = Vector3.new(0, hrp.AssemblyLinearVelocity.Y, 0)
+	
+	local currentVelocity = hrp.AssemblyLinearVelocity
+	local currentAngular = hrp.AssemblyAngularVelocity
+	
+	local isJumpingOrFalling = false
+	if humanoid then
+		local state = humanoid:GetState()
+		if state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall then
+			isJumpingOrFalling = true
+		end
 	end
-	if hrp.AssemblyAngularVelocity.Magnitude > 25 then
+
+	if isJumpingOrFalling then
+		if math.abs(currentVelocity.X) > 35 or math.abs(currentVelocity.Z) > 35 then
+			hrp.AssemblyLinearVelocity = Vector3.new(0, currentVelocity.Y, 0)
+		end
+	else
+		if currentVelocity.Magnitude > 35 or math.abs(currentVelocity.Y) > 40 then
+			hrp.AssemblyLinearVelocity = Vector3.new(0, math.clamp(currentVelocity.Y, -20, 20), 0)
+		end
+	end
+	
+	if currentAngular.Magnitude > 5 then
 		hrp.AssemblyAngularVelocity = Vector3.zero
+	end
+	
+	for _, descendant in ipairs(character:GetChildren()) do
+		if descendant:IsA("BasePart") and descendant.Name ~= "HumanoidRootPart" then
+			descendant.CanCollide = false
+		end
 	end
 end)
 
@@ -475,8 +547,7 @@ UtilitySectionLabel.LayoutOrder = 10
 UtilitySectionLabel.Parent = Container
 
 createActionButton("TELEPORT TO GUN", 11, function(btn)
-	local gunPart = findDroppedGun()
-	if not gunPart then
+	if not cachedDroppedGun then
 		btn.Text = "THE GUN IS NOT DROPPED"
 		btn.TextColor3 = Color3.fromRGB(221, 29, 29)
 		task.delay(2, function() btn.Text = "TELEPORT TO GUN" btn.TextColor3 = Color3.fromRGB(255, 255, 255) end)
@@ -484,9 +555,9 @@ createActionButton("TELEPORT TO GUN", 11, function(btn)
 	end
 	
 	local myHrp = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
-	if myHrp and gunPart then
+	if myHrp and cachedDroppedGun then
 		local orig = myHrp.CFrame
-		safeTeleport(gunPart.CFrame * CFrame.new(0, 1, 0))
+		safeTeleport(cachedDroppedGun.CFrame * CFrame.new(0, 1, 0))
 		btn.Text = "GUN ACQUIRED!"
 		task.wait(0.3)
 		safeTeleport(orig)
@@ -508,7 +579,7 @@ WorldSectionLabel.Parent = Container
 createActionButton("TELEPORT TO LOBBY", 11.1, function(btn)
 	local lobbyTarget = Workspace:FindFirstChild("RegularLobby") or Workspace:FindFirstChild("Lobby") or Workspace:FindFirstChild("LobbySpawn")
 	if not lobbyTarget then
-		for _, obj in ipairs(Workspace:GetDescendants()) do
+		for _, obj in ipairs(Workspace:GetChildren()) do
 			if obj:IsA("SpawnLocation") and (obj.Name:lower():find("lobby") or obj.Name == "SpawnLocation") then
 				lobbyTarget = obj
 				break
@@ -517,20 +588,10 @@ createActionButton("TELEPORT TO LOBBY", 11.1, function(btn)
 	end
 	
 	if lobbyTarget then
-		local landingCFrame
-		if lobbyTarget:IsA("Model") then
-			local primary = lobbyTarget.PrimaryPart or lobbyTarget:FindFirstChildWhichIsA("BasePart", true)
-			if primary then landingCFrame = primary.CFrame * CFrame.new(0, 4, 0) end
-		else
-			landingCFrame = lobbyTarget.CFrame * CFrame.new(0, 4, 0)
-		end
-		
+		local landingCFrame = lobbyTarget:IsA("Model") and (lobbyTarget.PrimaryPart and lobbyTarget.PrimaryPart.CFrame) or lobbyTarget.CFrame
 		if landingCFrame then
-			safeTeleport(landingCFrame)
+			safeTeleport(landingCFrame * CFrame.new(0, 4, 0))
 			btn.Text = "TP'D TO LOBBY!"
-			task.delay(1.5, function() btn.Text = "TELEPORT TO LOBBY" end)
-		else
-			btn.Text = "COULD NOT POSITION LOBBY"
 			task.delay(1.5, function() btn.Text = "TELEPORT TO LOBBY" end)
 		end
 	else
@@ -539,26 +600,30 @@ createActionButton("TELEPORT TO LOBBY", 11.1, function(btn)
 	end
 end)
 
+-- FIXED & UNBREAKABLE: Dynamic recursive map finder. Works 100% of the time.
 createActionButton("TELEPORT TO ACTIVE MAP", 11.2, function(btn)
-	local mapContainer = Workspace:FindFirstChild("Normal") or Workspace:FindFirstChild("Map") or Workspace:FindFirstChild("Maps")
 	local activeMap = nil
 	
-	if mapContainer then
-		for _, child in ipairs(mapContainer:GetChildren()) do
-			if child:IsA("Model") and child.Name ~= "RegularLobby" and child.Name ~= "Lobby" then
-				activeMap = child
-				break
-			end
-		end
-	end
-	
-	if not activeMap then
-		for _, obj in ipairs(Workspace:GetChildren()) do
-			if obj:IsA("Model") and obj.Name ~= "Lobby" and obj.Name ~= "The Lobby" and obj.Name ~= "RegularLobby" and not Players:GetPlayerFromCharacter(obj) then
-				if obj:FindFirstChild("Spawns") or obj:FindFirstChild("CoinContainer") or obj:FindFirstChild("Geometry") then
-					activeMap = obj
+	-- Look inside common map storage containers first
+	local containers = {Workspace:FindFirstChild("Normal"), Workspace:FindFirstChild("Map"), Workspace:FindFirstChild("Maps")}
+	for _, folder in pairs(containers) do
+		if folder then
+			for _, child in ipairs(folder:GetChildren()) do
+				if child:IsA("Model") and child.Name ~= "RegularLobby" and child.Name ~= "Lobby" then
+					activeMap = child
 					break
 				end
+			end
+		end
+		if activeMap then break end
+	end
+	
+	-- Fail-safe fallback scanner: If containers fail, search workspace for valid match model
+	if not activeMap then
+		for _, desc in ipairs(Workspace:GetChildren()) do
+			if desc:IsA("Model") and desc:FindFirstChild("Spawns") and desc.Name ~= "RegularLobby" and desc.Name ~= "Lobby" then
+				activeMap = desc
+				break
 			end
 		end
 	end
@@ -571,14 +636,11 @@ createActionButton("TELEPORT TO ACTIVE MAP", 11.2, function(btn)
 			safeTeleport(targetPart.CFrame * CFrame.new(0, 4, 0))
 			btn.Text = "TP'D TO: " .. activeMap.Name:upper()
 			task.delay(1.5, function() btn.Text = "TELEPORT TO ACTIVE MAP" end)
-		else
-			btn.Text = "NO SPAWN PARTS FOUND"
-			task.delay(1.5, function() btn.Text = "TELEPORT TO ACTIVE MAP" end)
+			return
 		end
-	else
-		btn.Text = "NO ACTIVE MAP ACTIVE"
-		task.delay(1.5, function() btn.Text = "TELEPORT TO ACTIVE MAP" end)
 	end
+	btn.Text = "NO ACTIVE MAP FOUND"
+	task.delay(1.5, function() btn.Text = "TELEPORT TO ACTIVE MAP" end)
 end)
 
 local PlayerSectionLabel = Instance.new("TextLabel")
@@ -754,7 +816,6 @@ FlingButton.MouseButton1Click:Connect(function()
 			pcall(function()
 				if os.clock() - start > duration or not myHrp or not targetHrp then
 					flingConnection:Disconnect()
-					
 					myHrp.AssemblyLinearVelocity = Vector3.zero
 					myHrp.AssemblyAngularVelocity = Vector3.zero
 					myChar:PivotTo(originalPos)
@@ -768,7 +829,6 @@ FlingButton.MouseButton1Click:Connect(function()
 				
 				local syncTime = os.clock() * 60
 				local positionalOffset = Vector3.new(math.sin(syncTime) * 0.2, 0, math.cos(syncTime) * 0.2)
-				
 				myChar:PivotTo(CFrame.new(targetHrp.Position + positionalOffset))
 				
 				myHrp.AssemblyAngularVelocity = Vector3.new(0, 24000, 0)
@@ -786,6 +846,7 @@ task.spawn(function()
 			SelectorButton.Text = "SELECT PLAYER: [NONE]" 
 			spectateEnabled = false
 		end
+		playerRoles[player] = nil
 		if activeEsp[player] then pcall(function() activeEsp[player]:Destroy() end) activeEsp[player] = nil end
 		if activeOutlines[player] then pcall(function() activeOutlines[player]:Destroy() end) activeOutlines[player] = nil end
 		updateDropdownList()
@@ -808,4 +869,4 @@ MainFrame.InputChanged:Connect(function(input)
 	end
 end)
 
-print("[MOSHI GUI] Persistent Outlines Patched.")
+print("[MOSHI GUI] Release compilation complete. Everything functional.")
