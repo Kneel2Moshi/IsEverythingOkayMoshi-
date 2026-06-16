@@ -1,1055 +1,1717 @@
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
-local TweenService = game:GetService("TweenService")
+-- =============================================================================
+-- 1. GLOBAL CONFIGURATION & SERVICE SETUP
+-- =============================================================================
+local Players = game:GetService("Players") 
+local RunService = game:GetService("RunService") 
+local Workspace = game:GetService("Workspace") 
+local TweenService = game:GetService("TweenService") 
+local Lighting = game:GetService("Lighting") 
+local localPlayer = Players.LocalPlayer 
+local playerGui = localPlayer:WaitForChild("PlayerGui") 
+local camera = Workspace.CurrentCamera 
 
-local localPlayer = Players.LocalPlayer
-local playerGui = localPlayer:WaitForChild("PlayerGui")
-local camera = Workspace.CurrentCamera
+-- Whitelisted usernames allowed to use the premium Exploiter Detector
+local Whitelist = {
+    ["King495272"] = true,
+    ["Bff_sistereva"] = true
+}
 
-if playerGui:FindFirstChild("MoshiGuiUI") then 
-	playerGui.MoshiGuiUI:Destroy() 
+-- Premium Creator Routing Details
+local TIKTOK_LINK = "https://www.tiktok.com/@moshi2816?_r=1&_t=ZS-97G8NIC1p4O"
+local TIKTOK_USER = "@moshi2816"
+
+-- Clean old instances to prevent dual-execution bugs
+if playerGui:FindFirstChild("MoshiGuiUI") then 	
+    playerGui.MoshiGuiUI:Destroy() 
+end 
+
+local OutlineStorage = Workspace:FindFirstChild("MoshiOutlineStorage") 
+if OutlineStorage then OutlineStorage:Destroy() end 
+OutlineStorage = Instance.new("Folder") 
+OutlineStorage.Name = "MoshiOutlineStorage" 
+OutlineStorage.Parent = Workspace 
+
+-- ============================================================ 
+-- PALETTE 
+-- ============================================================ 
+local C_ORANGE = Color3.fromRGB(255, 145, 40) 
+local C_ODARK = Color3.fromRGB(190, 90, 10) 
+local C_OLIGHT = Color3.fromRGB(255, 190, 100) 
+local C_CREAM = Color3.fromRGB(255, 232, 195) 
+local C_BG = Color3.fromRGB(16, 12, 8) 
+local C_BG2 = Color3.fromRGB(26, 19, 11) 
+local C_BG3 = Color3.fromRGB(36, 27, 15) 
+local C_STROKE = Color3.fromRGB(255, 155, 55) 
+local C_WHITE = Color3.fromRGB(255, 255, 255) 
+local C_BLACK = Color3.fromRGB(0, 0, 0)
+local C_RED = Color3.fromRGB(255, 75, 55) 
+local C_GREEN = Color3.fromRGB(110, 255, 110) 
+local C_BLUE = Color3.fromRGB(75, 175, 255) 
+local C_YELLOW = Color3.fromRGB(255, 222, 55) 
+local C_PINK = Color3.fromRGB(255, 160, 180) 
+
+-- ============================================================ 
+-- STATE 
+-- ============================================================ 
+local espEnabled = false 
+local gunEspEnabled = false 
+local antiFlingEnabled = false 
+local spectateEnabled = false 
+local camLockEnabled = false 
+local aimViewerEnabled = false 
+local targetAimViewerEnabled = false 
+local detectionEnabled = false 
+local smoothnessLevel = 5 
+local predictionLevel = 3 
+local selectedPlayerName = "" 
+local customWalkSpeed = 16 
+local activeEsp = {} 
+local activeOutlines = {} 
+local droppedGunEspInstance = nil 
+local cachedDroppedGun = nil 
+local playerRoles = {} 
+
+local appendLog
+
+-- ============================================================ 
+-- EXPLOIT DETECTOR CONSTANTS 
+-- ============================================================ 
+local FLING_VEL_THRESHOLD = 500 
+local AIMBOT_DOT_THRESHOLD = -0.97 
+local AIMBOT_RVEL_MIN = 110 
+local AIMBOT_TICK_NEEDED = 4 
+local SPEED_THRESHOLD = 38 
+local SPEED_TICKS_NEEDED = 90 
+local MIN_WARMUP_FRAMES = 25 
+local flaggedExploiters = {} 
+local playerHistory = {} 
+
+local function markAsExploiter(p, reason) 	
+    if not flaggedExploiters[p] then 		
+        flaggedExploiters[p] = reason 		
+        warn("[MOSHI] " .. p.Name .. " flagged: " .. reason) 
+        if appendLog then
+            appendLog(string.format("[%s] Flagged for %s", p.Name:upper(), reason))
+        end
+    end 
+end 
+
+local function clearHistory(p) 	
+    playerHistory[p] = nil 
+end 
+
+local function hasMobilityPerk(p) 	
+    local char = p.Character 	
+    local bp = p:FindFirstChild("Backpack") 	
+    if not char then return false end 	
+    if char:FindFirstChild("Haste") or (bp and bp:FindFirstChild("Haste")) then return true end 	
+    if char:FindFirstChild("SpeedCoil") or (bp and bp:FindFirstChild("SpeedCoil")) then return true end 	
+    if playerRoles[p] == "Murderer" then return true end 	
+    return false 
+end 
+
+-- ============================================================ 
+local aimLine = Drawing.new("Line") 
+aimLine.Thickness = 1 
+aimLine.Color = C_ORANGE 
+aimLine.Transparency = 0.6 
+aimLine.Visible = false 
+
+local targetAimLine = Drawing.new("Line") 
+targetAimLine.Thickness = 2 
+targetAimLine.Color = Color3.fromRGB(255, 55, 110) 
+targetAimLine.Transparency = 0.85 
+targetAimLine.Visible = false 
+
+local function getPlayerRole(p) 	
+    local char = p.Character 	
+    local bp = p:FindFirstChild("Backpack") 	
+    local hasKnife = (char and char:FindFirstChild("Knife")) or (bp and bp:FindFirstChild("Knife")) 	
+    local hasGun = (char and (char:FindFirstChild("Gun") or char:FindFirstChild("Revolver"))) or (bp and (bp:FindFirstChild("Gun") or bp:FindFirstChild("Revolver"))) 	
+    if hasKnife then return "Murderer", C_RED end 	
+    if hasGun then return "Sheriff", C_BLUE end 	
+    return "Innocent", C_GREEN 
+end 
+
+local function getMurderer() 	
+    for _, p in ipairs(Players:GetPlayers()) do 		
+        if p ~= localPlayer and playerRoles[p] == "Murderer" and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then 			
+            return p 		
+        end 	
+    end 
+end 
+
+local function buildTagForPlayer(p) 	
+    if p == localPlayer then return end 	
+    local char = p.Character 	
+    if not char then return end 	
+    local head = char:WaitForChild("Head", 4) 	
+    if not head then return end 	
+    local roleName, roleColor = getPlayerRole(p) 	
+    playerRoles[p] = roleName 	
+    if activeEsp[p] then pcall(function() activeEsp[p]:Destroy() end) end 	
+    
+    local bGui = Instance.new("BillboardGui") 	
+    bGui.Name = p.Name .. "_TagESP" 	
+    bGui.Size = UDim2.new(0, 180, 0, 42) 	
+    bGui.StudsOffset = Vector3.new(0, 3.8, 0) 	
+    bGui.AlwaysOnTop = true 	
+    
+    local label = Instance.new("TextLabel") 	
+    label.Size = UDim2.new(1, 0, 1, 0) 	
+    label.BackgroundTransparency = 1 	
+    label.Font = Enum.Font.RobotoMono 	
+    label.TextSize = 12 
+    label.TextStrokeTransparency = 0 	
+    label.TextStrokeColor3 = C_BLACK 	
+    label.Text = flaggedExploiters[p] and string.format("%s\n[!! CHEATER: %s]", p.Name:upper(), flaggedExploiters[p]) or string.format("%s\n[%s]", p.Name:upper(), roleName) 	
+    label.TextColor3 = flaggedExploiters[p] and C_ORANGE or roleColor 	
+    label.Visible = espEnabled 	
+    label.Parent = bGui 	
+    bGui.Parent = head 	
+    activeEsp[p] = bGui 	
+    
+    if not activeOutlines[p] or activeOutlines[p].Parent ~= OutlineStorage then 		
+        if activeOutlines[p] then pcall(function() activeOutlines[p]:Destroy() end) end 		
+        local hl = Instance.new("Highlight") 		
+        hl.Name = p.Name .. "_Outline" 		
+        hl.FillTransparency = 0.87 		
+        hl.OutlineTransparency = 0 		
+        hl.OutlineColor = flaggedExploiters[p] and C_ORANGE or roleColor 		
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop 		
+        hl.Enabled = espEnabled 		
+        hl.Adornee = char 		
+        hl.Parent = OutlineStorage 		
+        activeOutlines[p] = hl 	
+    else 		
+        activeOutlines[p].Adornee = char 		
+        activeOutlines[p].OutlineColor = flaggedExploiters[p] and C_ORANGE or roleColor 		
+        activeOutlines[p].Enabled = espEnabled 	
+    end 
+end 
+
+local function applyEspTags(p) 	
+    if p == localPlayer then return end 	
+    clearHistory(p) 	
+    p.CharacterAdded:Connect(function() 		
+        clearHistory(p) 		
+        task.wait(0.3) 		
+        buildTagForPlayer(p) 	
+    end) 	
+    if p.Character then task.spawn(buildTagForPlayer, p) end 
+end 
+
+local function isHeldByPlayer(obj) 	
+    for _, p in ipairs(Players:GetPlayers()) do 		
+        if p.Character and obj:IsDescendantOf(p.Character) then return true end 	
+    end 	
+    return false 
+end 
+
+local function scanForDroppedGun() 	
+    for _, obj in ipairs(Workspace:GetDescendants()) do 		
+        if (obj.Name == "GunDrop" or obj.Name == "DroppedGun") and not isHeldByPlayer(obj) then 			
+            if obj:IsA("BasePart") then cachedDroppedGun = obj; return 			
+            elseif obj:FindFirstChildWhichIsA("BasePart") then 				
+                cachedDroppedGun = obj:FindFirstChildWhichIsA("BasePart"); return 			
+            end 		
+        end 		
+        if obj:IsA("Tool") and (obj.Name == "Gun" or obj.Name == "Revolver") and not isHeldByPlayer(obj) then 			
+            local h = obj:FindFirstChild("Handle") or obj:FindFirstChildWhichIsA("BasePart", true) 			
+            if h then cachedDroppedGun = h; return end 		
+        end 	
+    end 	
+    cachedDroppedGun = nil 
+end 
+
+task.spawn(function() 	
+    while true do 		
+        task.wait(0.25) 		
+        scanForDroppedGun() 		
+        for _, p in ipairs(Players:GetPlayers()) do 			
+            if p ~= localPlayer and p.Character then 				
+                local role, color = getPlayerRole(p) 				
+                playerRoles[p] = role 				
+                local gui = activeEsp[p] 				
+                local head = p.Character:FindFirstChild("Head") 				
+                if espEnabled and head then 					
+                    if not gui or not gui.Parent or gui.Parent ~= head then 						
+                        buildTagForPlayer(p); gui = activeEsp[p] 					
+                    end 					
+                    local lbl = gui and gui:FindFirstChildOfClass("TextLabel") 					
+                    local outline = activeOutlines[p] 					
+                    if lbl then 						
+                        lbl.Text = flaggedExploiters[p] and string.format("%s\n[!! CHEATER: %s]", p.Name:upper(), flaggedExploiters[p]) or string.format("%s\n[%s]", p.Name:upper(), role) 						
+                        lbl.TextColor3 = flaggedExploiters[p] and C_ORANGE or color 						
+                        lbl.Visible = true 					
+                    end 					
+                    if outline then 						
+                        outline.OutlineColor = flaggedExploiters[p] and C_ORANGE or color 						
+                        outline.Enabled = true 						
+                        outline.Adornee = p.Character 					
+                    end 				
+                end 			
+            end 		
+        end 	
+    end 
+end) 
+
+local function updateDroppedGunEsp() 	
+    if cachedDroppedGun and gunEspEnabled then 		
+        if not droppedGunEspInstance or droppedGunEspInstance.Parent ~= cachedDroppedGun then 			
+            if droppedGunEspInstance then droppedGunEspInstance:Destroy() end 			
+            droppedGunEspInstance = Instance.new("BillboardGui") 			
+            droppedGunEspInstance.Name = "DroppedGunESP" 			
+            droppedGunEspInstance.Size = UDim2.new(0, 150, 0, 28) 			
+            droppedGunEspInstance.StudsOffset = Vector3.new(0, 2, 0) 			
+            droppedGunEspInstance.AlwaysOnTop = true 			
+            local lbl = Instance.new("TextLabel") 			
+            lbl.Size = UDim2.new(1, 0, 1, 0) 			
+            lbl.BackgroundTransparency = 1 			
+            lbl.Font = Enum.Font.RobotoMono 			
+            lbl.TextSize = 13 			
+            lbl.TextColor3 = C_YELLOW 			
+            lbl.TextStrokeTransparency = 0 			
+            lbl.TextStrokeColor3 = C_BLACK
+            lbl.Text = "DROPPED GUN" 			
+            lbl.Parent = droppedGunEspInstance 			
+            droppedGunEspInstance.Parent = cachedDroppedGun 		
+        end 	
+    else 		
+        if droppedGunEspInstance then droppedGunEspInstance:Destroy(); droppedGunEspInstance = nil end 	
+    end 
+end 
+
+local function findPartialPlayer(s) 	
+    s = s:lower() 	
+    for _, p in ipairs(Players:GetPlayers()) do 		
+        if p ~= localPlayer and (p.Name:lower():sub(1,#s) == s or p.DisplayName:lower():sub(1,#s) == s) then 			
+            return p 		
+        end 	
+    end 
+end 
+
+local function safeTeleport(cf) 	
+    local char = localPlayer.Character; if not char then return end 	
+    local hrp = char:FindFirstChild("HumanoidRootPart") 	
+    local hum = char:FindFirstChildOfClass("Humanoid") 	
+    if hrp then hrp.AssemblyLinearVelocity = Vector3.zero; hrp.AssemblyAngularVelocity = Vector3.zero end 	
+    char:PivotTo(cf) 	
+    if hum then hum:ChangeState(Enum.HumanoidStateType.GettingUp) end 
+end 
+
+RunService.RenderStepped:Connect(function() 	
+    if spectateEnabled and selectedPlayerName ~= "" then 		
+        local tp = Players:FindFirstChild(selectedPlayerName) 		
+        local th = tp and tp.Character and tp.Character:FindFirstChildOfClass("Humanoid") 		
+        if th then camera.CameraSubject = th end 	
+    end 	
+    if targetAimViewerEnabled and selectedPlayerName ~= "" then 		
+        local tp = Players:FindFirstChild(selectedPlayerName) 		
+        local head = tp and tp.Character and tp.Character:FindFirstChild("Head") 		
+        if head then 			
+            local ep = head.Position + head.CFrame.LookVector * 120 			
+            local s1, on1 = camera:WorldToViewportPoint(head.Position) 			
+            local s2, on2 = camera:WorldToViewportPoint(ep) 			
+            if on1 and on2 then 				
+                targetAimLine.From = Vector2.new(s1.X, s1.Y) 				
+                targetAimLine.To = Vector2.new(s2.X, s2.Y) 				
+                targetAimLine.Visible = true 			
+            else targetAimLine.Visible = false end 		
+        else targetAimLine.Visible = false end 	
+    else targetAimLine.Visible = false end 	
+    if camLockEnabled then 		
+        local murd = getMurderer() 		
+        local mhrp = murd and murd.Character and murd.Character:FindFirstChild("HumanoidRootPart") 		
+        if mhrp then 			
+            local pred = mhrp.Position + mhrp.AssemblyLinearVelocity * (predictionLevel * 0.05) 			
+            camera.CFrame = camera.CFrame:Lerp( 				
+                CFrame.lookAt(camera.CFrame.Position, pred), 				
+                math.clamp(1 / (smoothnessLevel * 2), 0.01, 1) 			
+            ) 			
+            if aimViewerEnabled then 				
+                local sp, on = camera:WorldToViewportPoint(pred) 				
+                if on then 					
+                    aimLine.From = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2) 					
+                    aimLine.To = Vector2.new(sp.X, sp.Y) 					
+                    aimLine.Visible = true 				
+                else aimLine.Visible = false end 			
+            else aimLine.Visible = false end 		
+        else aimLine.Visible = false end 	
+    else aimLine.Visible = false end 
+end) 
+
+RunService.PreSimulation:Connect(function() 	
+    updateDroppedGunEsp() 	
+    if detectionEnabled then 		
+        for _, p in ipairs(Players:GetPlayers()) do 			
+            if p ~= localPlayer and p.Character then 				
+                local hrp = p.Character:FindFirstChild("HumanoidRootPart") 				
+                local hum = p.Character:FindFirstChildOfClass("Humanoid") 				
+                if hrp and hum then 					
+                    local pos = hrp.Position 					
+                    local vel = hrp.AssemblyLinearVelocity 					
+                    local rvel = hrp.AssemblyAngularVelocity 					
+                    local hist = playerHistory[p] 					
+                    if hist then 						
+                        local wf = hist.warmupFrames or 0 						
+                        local warmedUp = wf >= MIN_WARMUP_FRAMES 						
+                        if warmedUp then 							
+                            if vel.Magnitude > FLING_VEL_THRESHOLD or rvel.Magnitude > FLING_VEL_THRESHOLD then 								
+                                markAsExploiter(p, "FLING") 							
+                            end 							
+                            if hist.lastCFrame then 								
+                                local dot = hrp.CFrame.LookVector:Dot(hist.lastCFrame.LookVector) 								
+                                if dot < AIMBOT_DOT_THRESHOLD and rvel.Magnitude > AIMBOT_RVEL_MIN then 									
+                                    hist.aimTicks = (hist.aimTicks or 0) + 1 									
+                                    if hist.aimTicks >= AIMBOT_TICK_NEEDED then 										
+                                        markAsExploiter(p, "AIMBOT") 									
+                                    end 								
+                                else 									
+                                    hist.aimTicks = math.max(0, (hist.aimTicks or 0) - 1) 								
+                                end 							
+                            end 							
+                            if not hasMobilityPerk(p) then 								
+                                local hspeed = Vector3.new(vel.X, 0, vel.Z).Magnitude 								
+                                if hspeed > SPEED_THRESHOLD then 									
+                                    hist.speedTicks = (hist.speedTicks or 0) + 1 									
+                                    if hist.speedTicks >= SPEED_TICKS_NEEDED then 										
+                                        markAsExploiter(p, "SPEED") 									
+                                    end 								
+                                else 									
+                                    hist.speedTicks = math.max(0, (hist.speedTicks or 0) - 2) 								
+                                end 							
+                            else 								
+                                hist.speedTicks = 0 							
+                            end 						end 						
+                        hist.warmupFrames = math.min(wf + 1, MIN_WARMUP_FRAMES + 1) 					
+                    end 					
+                    playerHistory[p] = { 						
+                        lastPosition = pos, 						
+                        lastCFrame = hrp.CFrame, 						
+                        aimTicks = hist and hist.aimTicks or 0, 						
+                        speedTicks = hist and hist.speedTicks or 0, 						
+                        warmupFrames = hist and math.min((hist.warmupFrames or 0) + 1, MIN_WARMUP_FRAMES + 1) or 0, 					
+                    } 				
+                end 			
+            end 		
+        end 	
+    end 	
+    local char = localPlayer.Character; if not char then return end 	
+    local hum = char:FindFirstChildOfClass("Humanoid") 	
+    if hum and hum.WalkSpeed ~= customWalkSpeed then hum.WalkSpeed = customWalkSpeed end 	
+    if not antiFlingEnabled then return end 	
+    local hrp = char:FindFirstChild("HumanoidRootPart"); if not hrp then return end 	
+    local v = hrp.AssemblyLinearVelocity 	
+    local av = hrp.AssemblyAngularVelocity 	
+    local falling = hum and (hum:GetState() == Enum.HumanoidStateType.Jumping or hum:GetState() == Enum.HumanoidStateType.Freefall) 	
+    if falling then 		
+        if math.abs(v.X) > 35 or math.abs(v.Z) > 35 then 			
+            hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0) 		
+        end 	
+    else 		
+        if v.Magnitude > 35 or math.abs(v.Y) > 40 then 			
+            hrp.AssemblyLinearVelocity = Vector3.new(0, math.clamp(v.Y,-20,20), 0) 		
+        end 	
+    end 	
+    if av.Magnitude > 5 then hrp.AssemblyAngularVelocity = Vector3.zero end 	
+    for _, part in ipairs(char:GetChildren()) do 		
+        if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then part.CanCollide = false end 	
+    end 
+end) 
+
+-- ============================================================ 
+-- UI SETUP 
+-- ============================================================ 
+local ScreenGui = Instance.new("ScreenGui") 
+ScreenGui.Name = "MoshiGuiUI" 
+ScreenGui.ResetOnSpawn = false 
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling 
+ScreenGui.Parent = playerGui 
+
+local function corner(p, r) local c=Instance.new("UICorner");c.CornerRadius=UDim.new(0,r or 8);c.Parent=p;return c end 
+local function stroke(p, col, t) local s=Instance.new("UIStroke");s.Color=col or C_STROKE;s.Thickness=t or 1;s.Parent=p;return s end 
+local function gradient(p, c0, c1, rot) 	
+    local g=Instance.new("UIGradient") 	
+    g.Color=ColorSequence.new(c0,c1) 	
+    g.Rotation=rot or 90 	
+    g.Parent=p 	
+    return g 
+end 
+
+-- ============================================================ 
+-- STANDARD CAT FACE BUILDER (FOR MENUS)
+-- ============================================================ 
+local function buildCatFace(parent, z) 	
+    z = z or 10 	
+    local head = Instance.new("Frame") 	
+    head.Size = UDim2.new(0, 90, 0, 80) 	
+    head.Position = UDim2.new(0.5, -45, 0.5, -38) 	
+    head.BackgroundColor3 = C_ORANGE 	
+    head.BorderSizePixel = 0 	
+    head.ZIndex = z 	
+    head.Parent = parent 	
+    corner(head, 40) 	
+    stroke(head, C_ODARK, 2) 	
+    gradient(head, C_OLIGHT, C_ORANGE, 110) 	
+    for i, xOff in ipairs({28, 42, 56}) do 		
+        local stripe = Instance.new("Frame") 		
+        stripe.Size = UDim2.new(0, 4, 0, 18) 		
+        stripe.Position = UDim2.new(0, xOff, 0, 6) 		
+        stripe.BackgroundColor3 = C_ODARK 		
+        stripe.BackgroundTransparency = 0.3 		
+        stripe.ZIndex = z + 1 		
+        stripe.Parent = head 		
+        corner(stripe, 3) 	
+    end 	
+    local learOuter = Instance.new("Frame") 	
+    learOuter.Size = UDim2.new(0, 32, 0, 34) 	
+    learOuter.Position = UDim2.new(0, -6, 0, -16) 	
+    learOuter.BackgroundColor3 = C_ORANGE 	
+    learOuter.BorderSizePixel = 0 	
+    learOuter.ZIndex = z - 1 	
+    learOuter.Rotation = -18 	
+    learOuter.Parent = head 	
+    corner(learOuter, 5) 	
+    stroke(learOuter, C_ODARK, 2) 	
+    gradient(learOuter, C_OLIGHT, C_ORANGE, 130) 	
+    local learInner = Instance.new("Frame") 	
+    learInner.Size = UDim2.new(0, 16, 0, 18) 	
+    learInner.Position = UDim2.new(0.5, -8, 0, 6) 	
+    learInner.BackgroundColor3 = C_PINK 	
+    learInner.BorderSizePixel = 0 	
+    learInner.ZIndex = z 	
+    learInner.Parent = learOuter 	
+    corner(learInner, 4) 	
+    local rearOuter = Instance.new("Frame") 	
+    rearOuter.Size = UDim2.new(0, 32, 0, 34) 	
+    rearOuter.Position = UDim2.new(1, -26, 0, -16) 	
+    rearOuter.BackgroundColor3 = C_ORANGE 	
+    rearOuter.BorderSizePixel = 0 	
+    rearOuter.ZIndex = z - 1 	
+    rearOuter.Rotation = 18 	
+    rearOuter.Parent = head 	
+    corner(rearOuter, 5) 	
+    stroke(rearOuter, C_ODARK, 2) 	
+    gradient(rearOuter, C_OLIGHT, C_ORANGE, 50) 	
+    local rearInner = Instance.new("Frame") 	
+    rearInner.Size = UDim2.new(0, 16, 0, 18) 	
+    rearInner.Position = UDim2.new(0.5, -8, 0, 6) 	
+    rearInner.BackgroundColor3 = C_PINK 	
+    rearInner.BorderSizePixel = 0 	
+    rearInner.ZIndex = z 	
+    rearInner.Parent = rearOuter 	
+    corner(rearInner, 4) 	
+    local leyeSocket = Instance.new("Frame") 	
+    leyeSocket.Size = UDim2.new(0, 22, 0, 20) 	
+    leyeSocket.Position = UDim2.new(0, 12, 0, 27) 	
+    leyeSocket.BackgroundColor3 = C_WHITE 	
+    leyeSocket.BorderSizePixel = 0 	
+    leyeSocket.ZIndex = z + 1 	
+    leyeSocket.Parent = head 	
+    corner(leyeSocket, 10) 	
+    stroke(leyeSocket, C_ODARK, 1) 	
+    local leye = Instance.new("Frame") 	
+    leye.Size = UDim2.new(0, 14, 0, 15) 	
+    leye.Position = UDim2.new(0.5, -7, 0.5, -7) 	
+    leye.BackgroundColor3 = Color3.fromRGB(60, 195, 80) 	
+    leye.BorderSizePixel = 0 	
+    leye.ZIndex = z + 2 	
+    leye.Parent = leyeSocket 	
+    corner(leye, 7) 	
+    local lpupil = Instance.new("Frame") 	
+    lpupil.Size = UDim2.new(0, 4, 0, 12) 	
+    lpupil.Position = UDim2.new(0.5, -2, 0.5, -6) 	
+    lpupil.BackgroundColor3 = Color3.fromRGB(10, 10, 10) 	
+    lpupil.BorderSizePixel = 0 	
+    lpupil.ZIndex = z + 3 	
+    lpupil.Parent = leye 	
+    corner(lpupil, 3) 	
+    local lshine = Instance.new("Frame") 	
+    lshine.Size = UDim2.new(0, 4, 0, 4) 	
+    lshine.Position = UDim2.new(0, 2, 0, 1) 	
+    lshine.BackgroundColor3 = C_WHITE 	
+    lshine.BorderSizePixel = 0 	
+    lshine.ZIndex = z + 4 	
+    lshine.Parent = leye 	
+    corner(lshine, 2) 	
+    local reyeSocket = Instance.new("Frame") 	
+    reyeSocket.Size = UDim2.new(0, 22, 0, 20) 	
+    reyeSocket.Position = UDim2.new(1, -34, 0, 27) 	
+    reyeSocket.BackgroundColor3 = C_WHITE 	
+    reyeSocket.BorderSizePixel = 0 	
+    reyeSocket.ZIndex = z + 1 	
+    reyeSocket.Parent = head 	
+    corner(reyeSocket, 10) 	
+    stroke(reyeSocket, C_ODARK, 1) 	
+    local reye = Instance.new("Frame") 	
+    reye.Size = UDim2.new(0, 14, 0, 15) 	
+    reye.Position = UDim2.new(0.5, -7, 0.5, -7) 	
+    reye.BackgroundColor3 = Color3.fromRGB(60, 195, 80) 	
+    reye.BorderSizePixel = 0 	
+    reye.ZIndex = z + 2 	
+    reye.Parent = reyeSocket 	
+    corner(reye, 7) 	
+    local rpupil = Instance.new("Frame") 	
+    rpupil.Size = UDim2.new(0, 4, 0, 12) 	
+    rpupil.Position = UDim2.new(0.5, -2, 0.5, -6) 	
+    rpupil.BackgroundColor3 = Color3.fromRGB(10, 10, 10) 	
+    rpupil.BorderSizePixel = 0 	
+    rpupil.ZIndex = z + 3 	
+    rpupil.Parent = reye 	
+    corner(rpupil, 3) 	
+    local rshine = Instance.new("Frame") 	
+    rshine.Size = UDim2.new(0, 4, 0, 4) 	
+    rshine.Position = UDim2.new(0, 2, 0, 1) 	
+    rshine.BackgroundColor3 = C_WHITE 	
+    rshine.BorderSizePixel = 0 	
+    rshine.ZIndex = z + 4 	
+    rshine.Parent = reye 	
+    corner(rshine, 2) 	
+    local muzzle = Instance.new("Frame") 	
+    muzzle.Size = UDim2.new(0, 44, 0, 26) 	
+    muzzle.Position = UDim2.new(0.5, -22, 1, -30) 	
+    muzzle.BackgroundColor3 = C_CREAM 	
+    muzzle.BorderSizePixel = 0 	
+    muzzle.ZIndex = z + 1 	
+    muzzle.Parent = head 	
+    corner(muzzle, 13) 	
+    stroke(muzzle, C_ODARK, 1) 	
+    local nose = Instance.new("Frame") 	
+    nose.Size = UDim2.new(0, 12, 0, 8) 	
+    nose.Position = UDim2.new(0.5, -6, 0, 2) 	
+    nose.BackgroundColor3 = C_PINK 	
+    nose.BorderSizePixel = 0 	
+    nose.ZIndex = z + 2 	
+    nose.Parent = muzzle 	
+    corner(nose, 4) 	
+    local philtrum = Instance.new("Frame") 	
+    philtrum.Size = UDim2.new(0, 1, 0, 6) 	
+    philtrum.Position = UDim2.new(0.5, 0, 0, 9) 	
+    philtrum.BackgroundColor3 = C_ODARK 	
+    philtrum.BackgroundTransparency = 0.4 	
+    philtrum.BorderSizePixel = 0 	
+    philtrum.ZIndex = z + 2 	
+    philtrum.Parent = muzzle 	
+    local mouthL = Instance.new("Frame") 	
+    mouthL.Size = UDim2.new(0, 12, 0, 2) 	
+    mouthL.Position = UDim2.new(0.5, -13, 1, -5) 	
+    mouthL.BackgroundColor3 = C_ODARK 	
+    mouthL.BackgroundTransparency = 0.3 	
+    mouthL.BorderSizePixel = 0 	
+    mouthL.Rotation = 20 	
+    mouthL.ZIndex = z + 2 	
+    mouthL.Parent = muzzle 	
+    corner(mouthL, 2) 	
+    local mouthR = Instance.new("Frame") 	
+    mouthR.Size = UDim2.new(0, 12, 0, 2) 	
+    mouthR.Position = UDim2.new(0.5, 1, 1, -5) 	
+    mouthR.BackgroundColor3 = C_ODARK 	
+    mouthR.BackgroundTransparency = 0.3 	
+    mouthR.BorderSizePixel = 0 	
+    mouthR.Rotation = -20 	
+    mouthR.ZIndex = z + 2 	
+    mouthR.Parent = muzzle 	
+    corner(mouthR, 2) 	
+    local whiskerData = { 		
+        {-46, -2, -10}, {-44, 5, 5}, {-42, 12, 15}, 		
+        {2, -2, 10}, {2, 5, -5}, {2, 12, -15}, 	
+    } 	
+    for _, wd in ipairs(whiskerData) do 		
+        local w = Instance.new("Frame") 		
+        w.Size = UDim2.new(0, 42, 0, 1) 		
+        w.Position = UDim2.new(0.5, wd[1], 0.5, wd[2]) 		
+        w.BackgroundColor3 = C_WHITE 		
+        w.BackgroundTransparency = 0.1 		
+        w.BorderSizePixel = 0 		
+        w.Rotation = wd[3] 		
+        w.ZIndex = z + 1 		
+        w.Parent = muzzle 	
+    end 	
+    for _, xOff in ipairs({4, 66}) do 		
+        local blush = Instance.new("Frame") 		
+        blush.Size = UDim2.new(0, 16, 0, 8) 		
+        blush.Position = UDim2.new(0, xOff, 0, 48) 		
+        blush.BackgroundColor3 = Color3.fromRGB(255, 160, 140) 		
+        blush.BackgroundTransparency = 0.5 		
+        blush.BorderSizePixel = 0 		
+        blush.ZIndex = z + 1 		
+        blush.Parent = head 		
+        corner(blush, 8) 	
+    end 	
+    return head, leye, reye 
+end 
+
+-- ============================================================ 
+-- SMALLER CAT LOGO FOR LEFT-SIDE OVERLAY MENU TOGGLE BUTTON
+-- ============================================================ 
+local function buildSmallAlternativeCatFace(parent, z)
+    z = z or 10
+    local head = Instance.new("Frame")
+    head.Size = UDim2.new(0, 56, 0, 50)
+    head.Position = UDim2.new(0.5, -28, 0.5, -25)
+    head.BackgroundColor3 = C_CREAM
+    head.BorderSizePixel = 0
+    head.ZIndex = z
+    head.Parent = parent
+    corner(head, 25)
+    stroke(head, C_STROKE, 2)
+    gradient(head, C_WHITE, C_CREAM, 90)
+
+    local le = Instance.new("Frame")
+    le.Size = UDim2.new(0, 18, 0, 20)
+    le.Position = UDim2.new(0, -2, 0, -10)
+    le.BackgroundColor3 = C_BG2
+    le.ZIndex = z - 1
+    le.Rotation = -25
+    le.Parent = head
+    corner(le, 4)
+    stroke(le, C_STROKE, 1)
+
+    local re = Instance.new("Frame")
+    re.Size = UDim2.new(0, 18, 0, 20)
+    re.Position = UDim2.new(1, -16, 0, -10)
+    re.BackgroundColor3 = C_BG2
+    re.ZIndex = z - 1
+    re.Rotation = 25
+    re.Parent = head
+    corner(re, 4)
+    stroke(re, C_STROKE, 1)
+
+    local ley = Instance.new("Frame")
+    ley.Size = UDim2.new(0, 10, 0, 10)
+    ley.Position = UDim2.new(0, 10, 0, 15)
+    ley.BackgroundColor3 = C_ORANGE
+    ley.ZIndex = z + 1
+    ley.Parent = head
+    corner(ley, 5)
+
+    local rey = Instance.new("Frame")
+    rey.Size = UDim2.new(0, 10, 0, 10)
+    rey.Position = UDim2.new(1, -20, 0, 15)
+    rey.BackgroundColor3 = C_ORANGE
+    rey.ZIndex = z + 1
+    rey.Parent = head
+    corner(rey, 5)
+
+    local lp = Instance.new("Frame")
+    lp.Size = UDim2.new(0, 2, 0, 8)
+    lp.Position = UDim2.new(0.5, -1, 0.5, -4)
+    lp.BackgroundColor3 = C_BLACK
+    lp.ZIndex = z + 2
+    lp.Parent = ley
+
+    local rp = Instance.new("Frame")
+    rp.Size = UDim2.new(0, 2, 0, 8)
+    rp.Position = UDim2.new(0.5, -1, 0.5, -4)
+    rp.BackgroundColor3 = C_BLACK
+    rp.ZIndex = z + 2
+    rp.Parent = rey
+
+    local n = Instance.new("Frame")
+    n.Size = UDim2.new(0, 6, 0, 4)
+    n.Position = UDim2.new(0.5, -3, 0, 28)
+    n.BackgroundColor3 = C_PINK
+    n.ZIndex = z + 1
+    n.Parent = head
+    corner(n, 2)
+
+    return head, ley, rey
 end
 
-local OutlineStorage = Workspace:FindFirstChild("MoshiOutlineStorage")
-if OutlineStorage then OutlineStorage:Destroy() end
-OutlineStorage = Instance.new("Folder")
-OutlineStorage.Name = "MoshiOutlineStorage"
-OutlineStorage.Parent = Workspace
+-- ============================================================ 
+-- NOTICE POPUP 
+-- ============================================================ 
+local NoticeFrame = Instance.new("Frame") 
+NoticeFrame.Name = "NoticeFrame" 
+NoticeFrame.Size = UDim2.new(0, 310, 0, 210) 
+NoticeFrame.Position = UDim2.new(0.5, -155, 0.4, -105) 
+NoticeFrame.BackgroundColor3 = C_BG 
+NoticeFrame.BorderSizePixel = 0 
+NoticeFrame.Active = true 
+NoticeFrame.Visible = false 
+NoticeFrame.Parent = ScreenGui 
+corner(NoticeFrame, 14) 
+stroke(NoticeFrame, C_STROKE, 2) 
+gradient(NoticeFrame, C_BG2, C_BG, 160) 
 
-local espEnabled = false
-local gunEspEnabled = false
-local antiFlingEnabled = false
-local spectateEnabled = false
-local camLockEnabled = false
-local aimViewerEnabled = false
+local noticeCatContainer = Instance.new("Frame") 
+noticeCatContainer.Size = UDim2.new(0, 110, 0, 100) 
+noticeCatContainer.Position = UDim2.new(0.5, -55, 0, -50) 
+noticeCatContainer.BackgroundTransparency = 1 
+noticeCatContainer.BorderSizePixel = 0 
+noticeCatContainer.ZIndex = 8 
+noticeCatContainer.Parent = NoticeFrame 
+local nCatHead, nLEye, nREye = buildCatFace(noticeCatContainer, 8) 
 
-local smoothnessLevel = 5
-local predictionLevel = 3 -- Default prediction strength scale
-local selectedPlayerName = ""
-local customWalkSpeed = 16
+local NoticeLine = Instance.new("Frame") 
+NoticeLine.Size = UDim2.new(0, 0, 0, 1) 
+NoticeLine.Position = UDim2.new(0.5, 0, 0, 62) 
+NoticeLine.BackgroundColor3 = C_STROKE 
+NoticeLine.BorderSizePixel = 0 
+NoticeLine.ZIndex = 3 
+NoticeLine.Parent = NoticeFrame 
 
-local activeEsp = {}
-local activeOutlines = {}
-local droppedGunEspInstance = nil
-local cachedDroppedGun = nil
-local playerRoles = {}
+local NTitle = Instance.new("TextLabel") 
+NTitle.Size = UDim2.new(1, 0, 0, 28) 
+NTitle.Position = UDim2.new(0, 0, 0, 58) 
+NTitle.BackgroundTransparency = 1 
+NTitle.Text = "NOTICE" 
+NTitle.TextColor3 = C_ORANGE 
+NTitle.Font = Enum.Font.RobotoMono 
+NTitle.TextSize = 14 
+NTitle.TextStrokeTransparency = 0
+NTitle.TextStrokeColor3 = C_BLACK
+NTitle.ZIndex = 3 
+NTitle.Parent = NoticeFrame 
 
--- Aim Viewer Draw Object Setup
-local aimLine = Drawing.new("Line")
-aimLine.Thickness = 1
-aimLine.Color = Color3.fromRGB(255, 255, 255)
-aimLine.Transparency = 0.7
-aimLine.Visible = false
+local NText = Instance.new("TextLabel") 
+NText.Size = UDim2.new(1, -28, 0, 60) 
+NText.Position = UDim2.new(0, 14, 0, 90) 
+NText.BackgroundTransparency = 1 
+NText.Text = "This script was made for personal improvement purposes. Use responsibly." 
+NText.TextColor3 = C_WHITE 
+NText.Font = Enum.Font.RobotoMono 
+NText.TextSize = 12 
+NText.TextWrapped = true 
+NText.TextStrokeTransparency = 0
+NText.TextStrokeColor3 = C_BLACK
+NText.ZIndex = 3 
+NText.Parent = NoticeFrame 
 
-local function getPlayerRole(targetPlayer)
-	local character = targetPlayer.Character
-	local backpack = targetPlayer:FindFirstChild("Backpack")
-	
-	local hasKnife = (character and character:FindFirstChild("Knife")) or 
-	                 (backpack and backpack:FindFirstChild("Knife"))
-	                 
-	local hasGun = (character and character:FindFirstChild("Gun")) or 
-	               (backpack and backpack:FindFirstChild("Gun")) or
-	               (character and character:FindFirstChild("Revolver")) or
-	               (backpack and backpack:FindFirstChild("Revolver"))
+local NOkBtn = Instance.new("TextButton") 
+NOkBtn.Size = UDim2.new(1, -28, 0, 34) 
+NOkBtn.Position = UDim2.new(0, 14, 0, 162) 
+NOkBtn.BackgroundColor3 = C_BG3 
+NOkBtn.Text = "UNDERSTOOD" 
+NOkBtn.Font = Enum.Font.RobotoMono 
+NOkBtn.TextSize = 12 
+NOkBtn.TextColor3 = C_ORANGE 
+NOkBtn.TextStrokeTransparency = 0
+NOkBtn.TextStrokeColor3 = C_BLACK
+NOkBtn.ZIndex = 3 
+NOkBtn.Parent = NoticeFrame 
+corner(NOkBtn, 8) 
+stroke(NOkBtn, C_ODARK, 1) 
+gradient(NOkBtn, C_BG3, C_BG2, 90) 
 
-	if hasKnife then
-		return "Murderer", Color3.fromRGB(255, 0, 0)
-	elseif hasGun then
-		return "Sheriff", Color3.fromRGB(0, 180, 255)
-	end
-	
-	return "Innocent", Color3.fromRGB(0, 255, 0)
-end
-
-local function getMurderer()
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= localPlayer then
-			local role = playerRoles[p]
-			if role == "Murderer" and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
-				return p
-			end
-		end
-	end
-	return nil
-end
-
-local function buildTagForPlayer(targetPlayer)
-	if targetPlayer == localPlayer then return end
-	local character = targetPlayer.Character
-	if not character then return end
-	
-	local head = character:WaitForChild("Head", 4)
-	if not head then return end
-	
-	local roleName, roleColor = getPlayerRole(targetPlayer)
-	playerRoles[targetPlayer] = roleName
-	
-	if activeEsp[targetPlayer] then pcall(function() activeEsp[targetPlayer]:Destroy() end) end
-	
-	local bGui = Instance.new("BillboardGui")
-	bGui.Name = targetPlayer.Name .. "_TagESP"
-	bGui.Size = UDim2.new(0, 160, 0, 35)
-	bGui.StudsOffset = Vector3.new(0, 3.5, 0) 
-	bGui.AlwaysOnTop = true
-	
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(1, 0, 1, 0)
-	label.BackgroundTransparency = 1
-	label.Font = Enum.Font.Code
-	label.TextSize = 11
-	label.TextStrokeTransparency = 0.2
-	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-	label.Text = string.format("%s\n[%s]", targetPlayer.Name:upper(), roleName)
-	label.TextColor3 = roleColor
-	label.Visible = espEnabled
-	
-	label.Parent = bGui
-	bGui.Parent = head
-	activeEsp[targetPlayer] = bGui
-	
-	if not activeOutlines[targetPlayer] or activeOutlines[targetPlayer].Parent ~= OutlineStorage then
-		if activeOutlines[targetPlayer] then pcall(function() activeOutlines[targetPlayer]:Destroy() end) end
-		
-		local highlight = Instance.new("Highlight")
-		highlight.Name = targetPlayer.Name .. "_Outline"
-		highlight.FillTransparency = 0.85
-		highlight.OutlineTransparency = 0
-		highlight.OutlineColor = roleColor
-		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-		highlight.Enabled = espEnabled
-		highlight.Adornee = character
-		highlight.Parent = OutlineStorage
-		activeOutlines[targetPlayer] = highlight
-	else
-		activeOutlines[targetPlayer].Adornee = character
-		activeOutlines[targetPlayer].OutlineColor = roleColor
-		activeOutlines[targetPlayer].Enabled = espEnabled
-	end
-end
-
-local function applyEspTags(targetPlayer)
-	if targetPlayer == localPlayer then return end
-	
-	targetPlayer.CharacterAdded:Connect(function(char)
-		task.wait(0.3)
-		buildTagForPlayer(targetPlayer)
-	end)
-	
-	if targetPlayer.Character then
-		task.spawn(buildTagForPlayer, targetPlayer)
-	end
-end
-
-local function isHeldByPlayer(object)
-	for _, player in ipairs(Players:GetPlayers()) do
-		if player.Character and object:IsDescendantOf(player.Character) then
-			return true
-		end
-	end
-	return false
-end
-
-local function scanForDroppedGun()
-	for _, object in ipairs(Workspace:GetDescendants()) do
-		if (object.Name == "GunDrop" or object.Name == "DroppedGun") and not isHeldByPlayer(object) then
-			if object:IsA("BasePart") then
-				cachedDroppedGun = object
-				return
-			elseif object:FindFirstChildWhichIsA("BasePart") then
-				cachedDroppedGun = object:FindFirstChildWhichIsA("BasePart")
-				return
-			end
-		end
-		
-		if object:IsA("Tool") and (object.Name == "Gun" or object.Name == "Revolver") then
-			if not isHeldByPlayer(object) then
-				local handle = object:FindFirstChild("Handle") or object:FindFirstChildWhichIsA("BasePart", true)
-				if handle then
-					cachedDroppedGun = handle
-					return
-				end
-			end
-		end
-	end
-	cachedDroppedGun = nil
-end
-
-task.spawn(function()
-	while true do
-		task.wait(0.25)
-		scanForDroppedGun()
-		
-		for _, p in ipairs(Players:GetPlayers()) do
-			if p ~= localPlayer and p.Character then
-				local role, color = getPlayerRole(p)
-				playerRoles[p] = role
-				
-				local gui = activeEsp[p]
-				local hasHead = p.Character:FindFirstChild("Head")
-				
-				if espEnabled and hasHead then
-					if not gui or not gui.Parent or gui.Parent ~= hasHead then
-						buildTagForPlayer(p)
-						gui = activeEsp[p]
-					end
-					
-					local lbl = gui and gui:FindFirstChildOfClass("TextLabel")
-					if lbl then
-						lbl.Text = string.format("%s\n[%s]", p.Name:upper(), role)
-						lbl.TextColor3 = color
-						lbl.Visible = true
-					end
-					
-					local outline = activeOutlines[p]
-					if outline then
-						outline.OutlineColor = color
-						outline.Enabled = true
-						outline.Adornee = p.Character
-					end
-				end
-			end
-		end
-	end
-end)
-
-local function updateDroppedGunEsp()
-	if cachedDroppedGun and gunEspEnabled then
-		if not droppedGunEspInstance or droppedGunEspInstance.Parent ~= cachedDroppedGun then
-			if droppedGunEspInstance then droppedGunEspInstance:Destroy() end
-			
-			droppedGunEspInstance = Instance.new("BillboardGui")
-			droppedGunEspInstance.Name = "DroppedGunESP"
-			droppedGunEspInstance.Size = UDim2.new(0, 140, 0, 25)
-			droppedGunEspInstance.StudsOffset = Vector3.new(0, 2, 0)
-			droppedGunEspInstance.AlwaysOnTop = true
-			
-			local label = Instance.new("TextLabel")
-			label.Size = UDim2.new(1, 0, 1, 0)
-			label.BackgroundTransparency = 1
-			label.Font = Enum.Font.Code
-			label.TextSize = 12
-			label.TextColor3 = Color3.fromRGB(255, 235, 0) 
-			label.TextStrokeTransparency = 0.2
-			label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-			label.Text = "★ DROPPED GUN ★"
-			
-			label.Parent = droppedGunEspInstance
-			droppedGunEspInstance.Parent = cachedDroppedGun
-		end
-	else
-		if droppedGunEspInstance then
-			droppedGunEspInstance:Destroy()
-			droppedGunEspInstance = nil
-		end
-	end
-end
-
-local function findPartialPlayer(searchStr)
-	searchStr = searchStr:lower()
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= localPlayer and (p.Name:lower():sub(1, #searchStr) == searchStr or p.DisplayName:lower():sub(1, #searchStr) == searchStr) then
-			return p
-		end
-	end
-	return nil
-end
-
-local function safeTeleport(targetCFrame)
-	local char = localPlayer.Character
-	if not char then return end
-	local hrp = char:FindFirstChild("HumanoidRootPart")
-	local humanoid = char:FindFirstChildOfClass("Humanoid")
-	
-	if hrp then
-		hrp.AssemblyLinearVelocity = Vector3.zero
-		hrp.AssemblyAngularVelocity = Vector3.zero
-	end
-	
-	char:PivotTo(targetCFrame)
-	
-	if humanoid then
-		humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-	end
-end
-
--- RenderStepped System Loop Handles Camera tracking updates
-RunService.RenderStepped:Connect(function()
-	if spectateEnabled and selectedPlayerName ~= "" then
-		local targetPlayer = Players:FindFirstChild(selectedPlayerName)
-		local targetChar = targetPlayer and targetPlayer.Character
-		local targetHumanoid = targetChar and targetChar:FindFirstChildOfClass("Humanoid")
-		
-		if targetHumanoid then
-			camera.CameraSubject = targetHumanoid
-			return
-		end
-	end
-
-	if camLockEnabled then
-		local murderer = getMurderer()
-		local mudHrp = murderer and murderer.Character and murderer.Character:FindFirstChild("HumanoidRootPart")
-		
-		if mudHrp then
-			-- Calculate advanced lead aim projection position vector using target's live momentum fields
-			local timeFactor = (predictionLevel * 0.05)
-			local predictedPos = mudHrp.Position + (mudHrp.AssemblyLinearVelocity * timeFactor)
-			
-			local targetLookCFrame = CFrame.lookAt(camera.CFrame.Position, predictedPos)
-			local alphaFactor = math.clamp(1 / (smoothnessLevel * 2), 0.01, 1)
-			camera.CFrame = camera.CFrame:Lerp(targetLookCFrame, alphaFactor)
-			
-			-- Render crosshair indicator overlay path line if structural feature active
-			if aimViewerEnabled then
-				local screenPos, onScreen = camera:WorldToViewportPoint(predictedPos)
-				if onScreen then
-					aimLine.From = Vector2.new(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
-					aimLine.To = Vector2.new(screenPos.X, screenPos.Y)
-					aimLine.Visible = true
-				else
-					aimLine.Visible = false
-				end
-			else
-				aimLine.Visible = false
-			end
-		else
-			aimLine.Visible = false
-		end
-	else
-		aimLine.Visible = false
-	end
-end)
-
-RunService.PreSimulation:Connect(function()
-	updateDroppedGunEsp()
-	
-	local character = localPlayer.Character
-	if not character then return end
-	
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if humanoid and humanoid.WalkSpeed ~= customWalkSpeed then
-		humanoid.WalkSpeed = customWalkSpeed
-	end
-
-	if not antiFlingEnabled then return end
-	
-	local hrp = character:FindFirstChild("HumanoidRootPart")
-	if not hrp then return end
-	
-	local currentVelocity = hrp.AssemblyLinearVelocity
-	local currentAngular = hrp.AssemblyAngularVelocity
-	
-	local isJumpingOrFalling = false
-	if humanoid then
-		local state = humanoid:GetState()
-		if state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall then
-			isJumpingOrFalling = true
-		end
-	end
-
-	if isJumpingOrFalling then
-		if math.abs(currentVelocity.X) > 35 or math.abs(currentVelocity.Z) > 35 then
-			hrp.AssemblyLinearVelocity = Vector3.new(0, currentVelocity.Y, 0)
-		end
-	else
-		if currentVelocity.Magnitude > 35 or math.abs(currentVelocity.Y) > 40 then
-			hrp.AssemblyLinearVelocity = Vector3.new(0, math.clamp(currentVelocity.Y, -20, 20), 0)
-		end
-	end
-	
-	if currentAngular.Magnitude > 5 then
-		hrp.AssemblyAngularVelocity = Vector3.zero
-	end
-	
-	for _, descendant in ipairs(character:GetChildren()) do
-		if descendant:IsA("BasePart") and descendant.Name ~= "HumanoidRootPart" then
-			descendant.CanCollide = false
-		end
-	end
-end)
-
-local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "MoshiGuiUI"
-ScreenGui.ResetOnSpawn = false
-ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-ScreenGui.Parent = playerGui
-
-local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 230, 0, 210) 
-MainFrame.Position = UDim2.new(0.5, -115, 0.4, -105)
-MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
+-- ============================================================ 
+-- MAIN FRAME 
+-- ============================================================ 
+local MainFrame = Instance.new("Frame") 
+MainFrame.Size = UDim2.new(0, 245, 0, 225) 
+MainFrame.Position = UDim2.new(0.4, -122, 0.4, -112) 
+MainFrame.BackgroundColor3 = C_BG 
+MainFrame.BorderSizePixel = 0 
+MainFrame.Active = true 
 MainFrame.Visible = false 
-MainFrame.ClipsDescendants = true
-MainFrame.Parent = ScreenGui
+MainFrame.Parent = ScreenGui 
+corner(MainFrame, 12) 
+stroke(MainFrame, C_STROKE, 2) 
+gradient(MainFrame, C_BG2, C_BG, 160) 
 
-local MainStroke = Instance.new("UIStroke")
-MainStroke.Color = Color3.fromRGB(255, 255, 255)
-MainStroke.Thickness = 1
-MainStroke.Parent = MainFrame
+local mainCatContainer = Instance.new("Frame") 
+mainCatContainer.Size = UDim2.new(0, 90, 0, 82) 
+mainCatContainer.Position = UDim2.new(0.5, -45, 0, -42) 
+mainCatContainer.BackgroundTransparency = 1 
+mainCatContainer.BorderSizePixel = 0 
+mainCatContainer.ZIndex = 8 
+mainCatContainer.Parent = MainFrame 
+local mCatHead, mLEye, mREye = buildCatFace(mainCatContainer, 8) 
 
-local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, 0, 0, 30)
-Title.BackgroundTransparency = 1
-Title.Text = "MOSHI GUI"
-Title.TextColor3 = Color3.fromRGB(255, 255, 255)
-Title.Font = Enum.Font.Code
-Title.TextSize = 13
-Title.Parent = MainFrame
+local TitleBar = Instance.new("Frame") 
+TitleBar.Size = UDim2.new(1, 0, 0, 34) 
+TitleBar.Position = UDim2.new(0, 0, 0, 44) 
+TitleBar.BackgroundColor3 = C_BG2 
+TitleBar.BorderSizePixel = 0 
+TitleBar.ZIndex = 2 
+TitleBar.Parent = MainFrame 
+gradient(TitleBar, C_BG3, C_BG2, 90) 
 
-local Container = Instance.new("ScrollingFrame")
-Container.Size = UDim2.new(1, -16, 1, -40)
-Container.Position = UDim2.new(0, 8, 0, 32)
-Container.BackgroundTransparency = 1
-Container.BorderSizePixel = 0
-Container.ScrollBarThickness = 3
-Container.ScrollBarImageColor3 = Color3.fromRGB(255, 255, 255)
-Container.CanvasSize = UDim2.new(0, 0, 0, 920) -- Canvas extended to hold up to date tracking objects
-Container.Parent = MainFrame
+local TitleLabel = Instance.new("TextLabel") 
+TitleLabel.Size = UDim2.new(1, 0, 1, 0) 
+TitleLabel.BackgroundTransparency = 1 
+TitleLabel.Text = "MOSHI GUI" 
+TitleLabel.TextColor3 = C_ORANGE 
+TitleLabel.Font = Enum.Font.RobotoMono 
+TitleLabel.TextSize = 14 
+TitleLabel.TextStrokeTransparency = 0
+TitleLabel.TextStrokeColor3 = C_BLACK
+TitleLabel.ZIndex = 3 
+TitleLabel.Parent = TitleBar 
 
-local UIListLayout = Instance.new("UIListLayout")
-UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-UIListLayout.Padding = UDim.new(0, 6)
-UIListLayout.Parent = Container
+local TitleAccent = Instance.new("Frame") 
+TitleAccent.Size = UDim2.new(1, 0, 0, 2) 
+TitleAccent.Position = UDim2.new(0, 0, 1, -2) 
+TitleAccent.BackgroundColor3 = C_ORANGE 
+TitleAccent.BorderSizePixel = 0 
+TitleAccent.ZIndex = 3 
+TitleAccent.Parent = TitleBar 
+gradient(TitleAccent, C_OLIGHT, C_ODARK, 0) 
 
-local ToggleMenuBtn = Instance.new("TextButton")
-ToggleMenuBtn.Size = UDim2.new(0, 60, 0, 30)
-ToggleMenuBtn.Position = UDim2.new(0.05, 0, 0.25, 0)
-ToggleMenuBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-ToggleMenuBtn.Text = "MENU"
-ToggleMenuBtn.Font = Enum.Font.Code
-ToggleMenuBtn.TextSize = 11
-ToggleMenuBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+local Container = Instance.new("ScrollingFrame") 
+Container.Size = UDim2.new(1, -14, 1, -84) 
+Container.Position = UDim2.new(0, 7, 0, 80) 
+Container.BackgroundTransparency = 1 
+Container.BorderSizePixel = 0 
+Container.ScrollBarThickness = 3 
+Container.ScrollBarImageColor3 = C_ORANGE 
+Container.CanvasSize = UDim2.new(0, 0, 0, 1300) 
+Container.ZIndex = 2 
+Container.Parent = MainFrame 
+
+local UIList = Instance.new("UIListLayout") 
+UIList.SortOrder = Enum.SortOrder.LayoutOrder 
+UIList.Padding = UDim.new(0, 5) 
+UIList.Parent = Container 
+
+-- ============================================================ 
+-- MINI LOGS SIDE FRAME 
+-- ============================================================ 
+local LogsFrame = Instance.new("Frame") 
+LogsFrame.Name = "MoshiLogsFrame" 
+LogsFrame.Size = UDim2.new(0, 140, 0, 112) 
+LogsFrame.Position = UDim2.new(1, 8, 0, 0) 
+LogsFrame.BackgroundColor3 = C_BG 
+LogsFrame.BorderSizePixel = 0 
+LogsFrame.ZIndex = 2 
+LogsFrame.Parent = MainFrame 
+corner(LogsFrame, 12) 
+stroke(LogsFrame, C_STROKE, 2) 
+gradient(LogsFrame, C_BG2, C_BG, 160) 
+
+local LogsTitleBar = Instance.new("Frame") 
+LogsTitleBar.Size = UDim2.new(1, 0, 0, 24) 
+LogsTitleBar.Position = UDim2.new(0, 0, 0, 6) 
+LogsTitleBar.BackgroundColor3 = C_BG2 
+LogsTitleBar.BorderSizePixel = 0 
+LogsTitleBar.ZIndex = 2 
+LogsTitleBar.Parent = LogsFrame 
+gradient(LogsTitleBar, C_BG3, C_BG2, 90) 
+
+local LogsTitleLabel = Instance.new("TextLabel") 
+LogsTitleLabel.Size = UDim2.new(1, 0, 1, 0) 
+LogsTitleLabel.BackgroundTransparency = 1 
+LogsTitleLabel.Text = "SYSTEM LOGS" 
+LogsTitleLabel.TextColor3 = C_ORANGE 
+LogsTitleLabel.Font = Enum.Font.RobotoMono 
+LogsTitleLabel.TextSize = 10 
+LogsTitleLabel.TextStrokeTransparency = 0
+LogsTitleLabel.TextStrokeColor3 = C_BLACK
+LogsTitleLabel.ZIndex = 3 
+LogsTitleLabel.Parent = LogsTitleBar 
+
+local LogsContainer = Instance.new("ScrollingFrame") 
+LogsContainer.Size = UDim2.new(1, -12, 1, -40) 
+LogsContainer.Position = UDim2.new(0, 6, 0, 34) 
+LogsContainer.BackgroundTransparency = 1 
+LogsContainer.BorderSizePixel = 0 
+LogsContainer.ScrollBarThickness = 2 
+LogsContainer.ScrollBarImageColor3 = C_ORANGE 
+LogsContainer.CanvasSize = UDim2.new(0, 0, 0, 0) 
+LogsContainer.ZIndex = 3 
+LogsContainer.Parent = LogsFrame 
+
+local LogsList = Instance.new("UIListLayout") 
+LogsList.SortOrder = Enum.SortOrder.LayoutOrder 
+LogsList.Padding = UDim.new(0, 4) 
+LogsList.Parent = LogsContainer 
+
+appendLog = function(message) 
+    local logItem = Instance.new("TextLabel") 
+    logItem.Size = UDim2.new(1, -4, 0, math.huge) 
+    logItem.BackgroundTransparency = 1 
+    logItem.Font = Enum.Font.RobotoMono 
+    logItem.TextSize = 9 
+    logItem.TextColor3 = C_WHITE 
+    logItem.TextStrokeTransparency = 0
+    logItem.TextStrokeColor3 = C_BLACK
+    logItem.TextXAlignment = Enum.TextXAlignment.Left 
+    logItem.TextWrapped = true 
+    logItem.Text = string.format("[%s] %s", os.date("%X"), message) 
+    logItem.ZIndex = 4 
+    
+    logItem.Size = UDim2.new(1, -4, 0, logItem.TextBounds.Y + 2) 
+    logItem.Parent = LogsContainer 
+    
+    LogsContainer.CanvasSize = UDim2.new(0, 0, 0, LogsList.AbsoluteContentSize.Y + 10) 
+    LogsContainer.CanvasPosition = Vector2.new(0, math.max(0, LogsList.AbsoluteContentSize.Y - LogsContainer.AbsoluteSize.Y + 10)) 
+end 
+
+-- =============================================================================
+-- PREMIUM REDIRECTION PAYWALL MODAL (FIXED RENDER LAYER)
+-- =============================================================================
+local PremiumPrompt = Instance.new("Frame")
+PremiumPrompt.Name = "MoshiPremiumPrompt"
+PremiumPrompt.Size = UDim2.new(0, 310, 0, 210)
+PremiumPrompt.Position = UDim2.new(0.5, -155, 0.4, -105)
+PremiumPrompt.BackgroundColor3 = C_BG
+PremiumPrompt.BorderSizePixel = 0
+PremiumPrompt.Active = true
+PremiumPrompt.Visible = false
+PremiumPrompt.ZIndex = 25
+PremiumPrompt.Parent = ScreenGui
+
+corner(PremiumPrompt, 14)
+stroke(PremiumPrompt, C_ORANGE, 2)
+gradient(PremiumPrompt, C_BG2, C_BG, 160)
+
+-- Absolute fallback dimensional boundaries to bypass structural ui compression
+local TikTokLogo = Instance.new("ImageLabel")
+TikTokLogo.Name = "TikTokLogo"
+TikTokLogo.Size = UDim2.new(0, 50, 0, 50) 
+TikTokLogo.Position = UDim2.new(0.5, -25, 0, 20) 
+TikTokLogo.BackgroundTransparency = 1
+TikTokLogo.Image = "rbxassetid://112871554444195" 
+TikTokLogo.ScaleType = Enum.ScaleType.Fit 
+TikTokLogo.ZIndex = 30 -- Raised explicitly to top rendering layer
+TikTokLogo.Parent = PremiumPrompt
+
+local PUserLabel = Instance.new("TextLabel")
+PUserLabel.Size = UDim2.new(1, 0, 0, 20)
+PUserLabel.Position = UDim2.new(0, 0, 0, 78) 
+PUserLabel.BackgroundTransparency = 1
+PUserLabel.Text = TIKTOK_USER
+PUserLabel.TextColor3 = C_ORANGE
+PUserLabel.Font = Enum.Font.RobotoMono
+PUserLabel.TextSize = 12
+PUserLabel.TextStrokeTransparency = 0
+PUserLabel.TextStrokeColor3 = C_BLACK
+PUserLabel.ZIndex = 27
+PUserLabel.Parent = PremiumPrompt
+
+local PMessageLabel = Instance.new("TextLabel")
+PMessageLabel.Size = UDim2.new(1, -28, 0, 50)
+PMessageLabel.Position = UDim2.new(0, 14, 0, 102) 
+PMessageLabel.BackgroundTransparency = 1
+PMessageLabel.Text = "This feature requires a premium pass.\nPlease message the developer to unlock!"
+PMessageLabel.TextColor3 = C_WHITE
+PMessageLabel.Font = Enum.Font.RobotoMono
+PMessageLabel.TextSize = 11
+PMessageLabel.TextWrapped = true
+PMessageLabel.TextStrokeTransparency = 0
+PMessageLabel.TextStrokeColor3 = C_BLACK
+PMessageLabel.ZIndex = 27
+PMessageLabel.Parent = PremiumPrompt
+
+local PSureBtn = Instance.new("TextButton")
+PSureBtn.Size = UDim2.new(0, 132, 0, 32)
+PSureBtn.Position = UDim2.new(0.5, -142, 0, 158)
+PSureBtn.BackgroundColor3 = C_BG3
+PSureBtn.Text = "COPY TIKTOK"
+PSureBtn.Font = Enum.Font.RobotoMono
+PSureBtn.TextSize = 11
+PSureBtn.TextColor3 = C_GREEN
+PSureBtn.TextStrokeTransparency = 0
+PSureBtn.TextStrokeColor3 = C_BLACK
+PSureBtn.ZIndex = 27
+PSureBtn.Parent = PremiumPrompt
+corner(PSureBtn, 8)
+stroke(PSureBtn, Color3.fromRGB(35, 80, 35), 1)
+
+local PCancelBtn = Instance.new("TextButton")
+PCancelBtn.Size = UDim2.new(0, 132, 0, 32)
+PCancelBtn.Position = UDim2.new(0.5, 10, 0, 158)
+PCancelBtn.BackgroundColor3 = C_BG3
+PCancelBtn.Text = "NEVERMIND"
+PCancelBtn.Font = Enum.Font.RobotoMono
+PCancelBtn.TextSize = 11
+PCancelBtn.TextColor3 = Color3.fromRGB(255, 130, 130)
+PCancelBtn.TextStrokeTransparency = 0
+PCancelBtn.TextStrokeColor3 = C_BLACK
+PCancelBtn.ZIndex = 27
+PCancelBtn.Parent = PremiumPrompt
+corner(PCancelBtn, 8)
+stroke(PCancelBtn, Color3.fromRGB(95, 25, 25), 1)
+
+PCancelBtn.MouseButton1Click:Connect(function()
+    PremiumPrompt.Visible = false
+    PSureBtn.Text = "COPY TIKTOK"
+end)
+
+PSureBtn.MouseButton1Click:Connect(function()
+    local clipboardFunc = setclipboard or toclipboard
+    if clipboardFunc then
+        clipboardFunc(TIKTOK_LINK)
+        PSureBtn.Text = "LINK COPIED!"
+        task.wait(1.2)
+        PremiumPrompt.Visible = false
+        PSureBtn.Text = "COPY TIKTOK"
+    else
+        PSureBtn.Text = "COPY FAILED"
+    end
+end)
+
+-- ============================================================
+-- OVERLAY CAT TOGGLE MENU BUTTON (STAYS ON THE LEFT OF SCREEN)
+-- ============================================================
+local ToggleMenuBtn = Instance.new("TextButton") 
+ToggleMenuBtn.Size = UDim2.new(0, 60, 0, 52) 
+ToggleMenuBtn.Position = UDim2.new(0.04, 0, 0.25, 0) 
+ToggleMenuBtn.BackgroundTransparency = 1 
+ToggleMenuBtn.Text = "" 
 ToggleMenuBtn.Visible = false 
-ToggleMenuBtn.Parent = ScreenGui
+ToggleMenuBtn.Parent = ScreenGui 
 
-local ToggleStroke = Instance.new("UIStroke")
-ToggleStroke.Color = Color3.fromRGB(255, 255, 255)
-ToggleStroke.Thickness = 1
-ToggleStroke.Parent = ToggleMenuBtn
+local tCatHead, tLEye, tREye = buildSmallAlternativeCatFace(ToggleMenuBtn, 2)
 
-local IntroFrame = Instance.new("Frame")
-IntroFrame.Size = UDim2.new(0, 280, 0, 160)
-IntroFrame.Position = UDim2.new(0.5, -140, 0.4, -80)
-IntroFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-IntroFrame.BorderSizePixel = 0
-IntroFrame.Active = true
-IntroFrame.Parent = ScreenGui
-
-local IntroStroke = Instance.new("UIStroke")
-IntroStroke.Color = Color3.fromRGB(255, 255, 255)
-IntroStroke.Thickness = 1
-IntroStroke.Parent = IntroFrame
-
-local IntroTitle = Instance.new("TextLabel")
-IntroTitle.Size = UDim2.new(1, 0, 0, 35)
-IntroTitle.BackgroundTransparency = 1
-IntroTitle.Text = "NOTICE"
-IntroTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
-IntroTitle.Font = Enum.Font.Code
-IntroTitle.TextSize = 13
-IntroTitle.Parent = IntroFrame
-
-local IntroLine = Instance.new("Frame")
-IntroLine.Size = UDim2.new(0, 0, 0, 1)
-IntroLine.Position = UDim2.new(0.5, 0, 0, 32)
-IntroLine.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-IntroLine.BorderSizePixel = 0
-IntroLine.Parent = IntroFrame
-
-local IntroText = Instance.new("TextLabel")
-IntroText.Size = UDim2.new(1, -24, 0, 50)
-IntroText.Position = UDim2.new(0, 12, 0, 45)
-IntroText.BackgroundTransparency = 1
-IntroText.Text = "This script was made for personal improvement purposes."
-IntroText.TextColor3 = Color3.fromRGB(190, 190, 190)
-IntroText.Font = Enum.Font.Code
-IntroText.TextSize = 11
-IntroText.TextWrapped = true
-IntroText.Parent = IntroFrame
-
-local UnderstoodBtn = Instance.new("TextButton")
-UnderstoodBtn.Size = UDim2.new(1, -24, 0, 32)
-UnderstoodBtn.Position = UDim2.new(0, 12, 1, -44)
-UnderstoodBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-UnderstoodBtn.Text = "UNDERSTOOD"
-UnderstoodBtn.Font = Enum.Font.Code
-UnderstoodBtn.TextSize = 11
-UnderstoodBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-UnderstoodBtn.Parent = IntroFrame
-
-local UnderstoodStroke = Instance.new("UIStroke")
-UnderstoodStroke.Color = Color3.fromRGB(100, 100, 100)
-UnderstoodStroke.Thickness = 1
-UnderstoodStroke.Parent = UnderstoodBtn
-
-local uiTweenInProgress = false
-local menuOpenState = false
-
-local function animateMenuToggle(targetState)
-	if uiTweenInProgress then return end
-	uiTweenInProgress = true
-	
-	if targetState == true then
-		MainFrame.Size = UDim2.new(0, 230, 0, 0)
-		MainFrame.Visible = true
-		local openTween = TweenService:Create(MainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 210)})
-		openTween:Play()
-		openTween.Completed:Wait()
-		menuOpenState = true
-	else
-		local closeTween = TweenService:Create(MainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Size = UDim2.new(0, 230, 0, 0)})
-		closeTween:Play()
-		closeTween.Completed:Wait()
-		MainFrame.Visible = false
-		menuOpenState = false
-	end
-	uiTweenInProgress = false
-end
-
-ToggleMenuBtn.MouseButton1Click:Connect(function()
-	animateMenuToggle(not menuOpenState)
+local btnDragOn, btnDragStart, btnDragPos
+ToggleMenuBtn.InputBegan:Connect(function(inp)
+    if inp.UserInputType == Enum.UserInputType.MouseButton1 or inp.UserInputType == Enum.UserInputType.Touch then
+        btnDragOn = true; btnDragStart = inp.Position; btnDragPos = ToggleMenuBtn.Position
+        inp.Changed:Connect(function() if inp.UserInputState == Enum.UserInputState.End then btnDragOn = false end end)
+    end
+end)
+ToggleMenuBtn.InputChanged:Connect(function(inp)
+    if btnDragOn and (inp.UserInputType == Enum.UserInputType.MouseMovement or inp.UserInputType == Enum.UserInputType.Touch) then
+        local d = inp.Position - btnDragStart
+        ToggleMenuBtn.Position = UDim2.new(btnDragPos.X.Scale, btnDragPos.X.Offset + d.X, btnDragPos.Y.Scale, btnDragPos.Y.Offset + d.Y)
+    end
 end)
 
-task.spawn(function()
-	task.wait(0.2)
-	TweenService:Create(IntroLine, TweenInfo.new(0.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 200, 0, 1), Position = UDim2.new(0.5, -100, 0, 32)}):Play()
-end)
+-- ============================================================ 
+-- TRANSITIONS 
+-- ============================================================ 
+local uiTweenInProgress = false 
+local menuOpenState = false 
+local function animateMenuToggle(open) 	
+    if uiTweenInProgress then return end 	
+    uiTweenInProgress = true 	
+    if open then 		
+        MainFrame.Size = UDim2.new(0, 245, 0, 0) 		
+        MainFrame.Visible = true 		
+        local t = TweenService:Create(MainFrame, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.new(0, 245, 0, 225)}) 		
+        t:Play(); t.Completed:Wait() 		
+        menuOpenState = true 	
+    else 		
+        local t = TweenService:Create(MainFrame, TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.In), {Size = UDim2.new(0, 245, 0, 0)}) 		
+        t:Play(); t.Completed:Wait() 		
+        MainFrame.Visible = false 		
+        menuOpenState = false 	
+    end 	
+    uiTweenInProgress = false 
+end 
 
-UnderstoodBtn.MouseButton1Click:Connect(function()
-	UnderstoodBtn.Active = false
-	TweenService:Create(IntroFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Size = UDim2.new(0, 280, 0, 0), Position = UDim2.new(0.5, -140, 0.4, 0)}):Play()
-	local fadeOut = TweenService:Create(IntroStroke, TweenInfo.new(0.2), {Transparency = 1})
-	fadeOut:Play()
-	fadeOut.Completed:Wait()
-	IntroFrame:Destroy()
-	
-	ToggleMenuBtn.Visible = true
-	animateMenuToggle(true)
-end)
+ToggleMenuBtn.MouseButton1Click:Connect(function() 	
+    animateMenuToggle(not menuOpenState) 
+end) 
 
-local function createToggle(labelText, layoutOrder, callback)
-	local button = Instance.new("TextButton")
-	button.Size = UDim2.new(1, 0, 0, 30)
-	button.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-	button.Text = labelText .. " [OFF]"
-	button.Font = Enum.Font.Code
-	button.TextSize = 10
-	button.TextColor3 = Color3.fromRGB(180, 180, 180)
-	button.LayoutOrder = layoutOrder
-	button.Parent = Container
+task.spawn(function() 	
+    task.wait(0.2) 	
+    NoticeFrame.Visible = true 	
+    NoticeFrame.Size = UDim2.new(0, 310, 0, 0) 	
+    local t = TweenService:Create(NoticeFrame, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = UDim2.new(0, 310, 0, 210)}) 	
+    t:Play(); t.Completed:Wait() 	
+    TweenService:Create(NoticeLine, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 1), Position = UDim2.new(0.5, -115, 0, 62)}):Play() 	
+    task.wait(0.55) 	
+    for _, eye in ipairs({nLEye, nREye}) do 		
+        TweenService:Create(eye, TweenInfo.new(0.07), {Size = UDim2.new(0,14,0,2)}):Play() 	
+    end 	
+    task.wait(0.1) 	
+    for _, eye in ipairs({nLEye, nREye}) do 		
+        TweenService:Create(eye, TweenInfo.new(0.07), {Size = UDim2.new(0,14,0,15)}):Play() 	
+    end 
+end) 
 
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = Color3.fromRGB(50, 50, 50)
-	stroke.Thickness = 1
-	stroke.Parent = button
+NOkBtn.MouseButton1Click:Connect(function() 	
+    NOkBtn.Active = false 	
+    local t = TweenService:Create(NoticeFrame, TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.In), {Size = UDim2.new(0, 310, 0, 0)}) 	
+    t:Play(); t.Completed:Wait() 	
+    NoticeFrame:Destroy() 	
+    ToggleMenuBtn.Visible = true 	
+    animateMenuToggle(true) 
+    appendLog("System initialized.") 
+end) 
 
-	local state = false
-	button.MouseButton1Click:Connect(function()
-		state = not state
-		button.TextColor3 = state and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(180, 180, 180)
-		stroke.Color = state and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(50, 50, 50)
-		button.Text = labelText .. (state and " [ON]" or " [OFF]")
-		callback(state)
-	end)
-	return button, stroke
-end
+-- ============================================================ 
+-- UI HELPERS 
+-- ============================================================ 
+local function sectionLabel(text, order) 	
+    local f = Instance.new("Frame") 	
+    f.Size = UDim2.new(1, 0, 0, 20) 	
+    f.BackgroundColor3 = C_BG2
+    f.BorderSizePixel = 0 	
+    f.LayoutOrder = order 	
+    f.ZIndex = 3 	
+    f.Parent = Container 	
+    corner(f, 5) 	
+    gradient(f, C_BG3, C_BG2, 0) 	
+    local lbl = Instance.new("TextLabel") 	
+    lbl.Size = UDim2.new(1, 0, 1, 0) 	
+    lbl.BackgroundTransparency = 1 	
+    lbl.Text = text 	
+    lbl.TextColor3 = C_ORANGE 	
+    lbl.Font = Enum.Font.RobotoMono 	
+    lbl.TextSize = 10 	
+    lbl.TextStrokeTransparency = 0
+    lbl.TextStrokeColor3 = C_BLACK
+    lbl.ZIndex = 4 	
+    lbl.Parent = f 	
+    local accent = Instance.new("Frame") 	
+    accent.Size = UDim2.new(0, 3, 1, 0) 	
+    accent.BackgroundColor3 = C_ORANGE 	
+    accent.BorderSizePixel = 0 	
+    accent.ZIndex = 4 	
+    accent.Parent = f 	
+    corner(accent, 2) 	
+    return f 
+end 
 
-local function createActionButton(labelText, layoutOrder, callback)
-	local button = Instance.new("TextButton")
-	button.Size = UDim2.new(1, 0, 0, 30)
-	button.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
-	button.Text = labelText
-	button.Font = Enum.Font.Code
-	button.TextSize = 10
-	button.TextColor3 = Color3.fromRGB(255, 255, 255)
-	button.LayoutOrder = layoutOrder
-	button.Parent = Container
+-- ============================================================ 
+-- RECONFIGURED INHERITANCE: PROTECTED TEXT LAYER TINTING
+-- ============================================================ 
+local function mkToggle(labelText, order, cb) 	
+    local btn = Instance.new("TextButton") 	
+    btn.Size = UDim2.new(1, 0, 0, 30) 	
+    btn.BackgroundColor3 = C_BG2 	
+    btn.Text = "" 
+    btn.LayoutOrder = order 	
+    btn.ZIndex = 3 	
+    btn.Parent = Container 	
+    corner(btn, 7) 	
+    local sk = stroke(btn, Color3.fromRGB(120,80,45), 1) 	
+    gradient(btn, C_BG3, C_BG2, 90) 	
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -30, 1, 0)
+    lbl.Position = UDim2.new(0, 8, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = labelText .. " [OFF]"
+    lbl.Font = Enum.Font.RobotoMono
+    lbl.TextSize = 11
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextColor3 = C_WHITE 
+    lbl.TextStrokeTransparency = 0
+    lbl.TextStrokeColor3 = C_BLACK
+    lbl.ZIndex = 4
+    lbl.Parent = btn
 
-	local stroke = Instance.new("UIStroke")
-	stroke.Color = Color3.fromRGB(90, 90, 90)
-	stroke.Thickness = 1
-	stroke.Parent = button
+    local dot = Instance.new("Frame") 	
+    dot.Size = UDim2.new(0, 8, 0, 8) 	
+    dot.Position = UDim2.new(1, -18, 0.5, -4) 	
+    dot.BackgroundColor3 = C_WHITE 	
+    dot.BorderSizePixel = 0 	
+    dot.ZIndex = 4 	
+    dot.Parent = btn 	
+    corner(dot, 4) 	
+    
+    local state = false 	
+    btn.MouseButton1Click:Connect(function() 		
+        state = not state 		
+        lbl.TextColor3 = state and C_ORANGE or C_WHITE 
+        sk.Color = state and C_STROKE or Color3.fromRGB(120,80,45) 		
+        lbl.Text = labelText .. (state and " [ON]" or " [OFF]") 		
+        if state then 			
+            TweenService:Create(dot, TweenInfo.new(0.15), {BackgroundColor3 = C_ORANGE}):Play() 		
+        else 			
+            TweenService:Create(dot, TweenInfo.new(0.15), {BackgroundColor3 = C_WHITE}):Play() 		
+        end 		
+        appendLog(labelText .. (state and " activated." or " deactivated.")) 
+        
+        -- Custom clean implementation pass to forcefully reset switch back on rejection
+        cb(state, function()
+            state = false
+            lbl.TextColor3 = C_WHITE
+            sk.Color = Color3.fromRGB(120,80,45)
+            lbl.Text = labelText .. " [OFF]"
+            TweenService:Create(dot, TweenInfo.new(0.15), {BackgroundColor3 = C_WHITE}):Play()
+        end) 	
+    end) 	
+    return btn, sk 
+end 
 
-	button.MouseButton1Click:Connect(function() callback(button) end)
-end
+local function mkAction(labelText, order, cb) 	
+    local btn = Instance.new("TextButton") 	
+    btn.Size = UDim2.new(1, 0, 0, 30) 	
+    btn.BackgroundColor3 = C_BG3 	
+    btn.Text = "" 	
+    btn.LayoutOrder = order 	
+    btn.ZIndex = 3 	
+    btn.Parent = Container 	
+    corner(btn, 7) 	
+    stroke(btn, Color3.fromRGB(140,95,45), 1) 	
+    gradient(btn, C_BG3, C_BG2, 90) 	
+    
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -30, 1, 0)
+    lbl.Position = UDim2.new(0, 8, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = labelText
+    lbl.Font = Enum.Font.RobotoMono
+    lbl.TextSize = 11
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextColor3 = C_WHITE
+    lbl.TextStrokeTransparency = 0
+    lbl.TextStrokeColor3 = C_BLACK
+    lbl.ZIndex = 4
+    lbl.Parent = btn
 
-createToggle("ESP ROLE & OUTLINES", 1, function(state)
-	espEnabled = state
-	for _, gui in pairs(activeEsp) do
-		local label = gui:FindFirstChildOfClass("TextLabel")
-		if label then label.Visible = state end
-	end
-	for _, outline in pairs(activeOutlines) do
-		outline.Enabled = state
-	end
-end)
-createToggle("DROPPED GUN ESP", 2, function(state) gunEspEnabled = state end)
-createToggle("ANTI-FLING PROTECTION", 3, function(state) antiFlingEnabled = state end)
+    local arr = Instance.new("TextLabel") 	
+    arr.Size = UDim2.new(0, 16, 1, 0) 	
+    arr.Position = UDim2.new(1, -20, 0, 0) 	
+    arr.BackgroundTransparency = 1 	
+    arr.Text = ">" 	
+    arr.Font = Enum.Font.RobotoMono 	
+    arr.TextSize = 11 	
+    arr.TextColor3 = C_WHITE 	
+    arr.TextStrokeTransparency = 0
+    arr.TextStrokeColor3 = C_BLACK
+    arr.ZIndex = 4 	
+    arr.Parent = btn 	
+    btn.MouseButton1Click:Connect(function() cb(lbl) end) 
+end 
 
-local SpeedSectionLabel = Instance.new("TextLabel")
-SpeedSectionLabel.Size = UDim2.new(1, 0, 0, 18)
-SpeedSectionLabel.BackgroundTransparency = 1
-SpeedSectionLabel.Text = "─── MOVEMENT & PHYSICS ───"
-SpeedSectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
-SpeedSectionLabel.Font = Enum.Font.Code
-SpeedSectionLabel.TextSize = 9
-SpeedSectionLabel.LayoutOrder = 4
-SpeedSectionLabel.Parent = Container
+-- ============================================================ 
+-- COMPONENTS 
+-- ============================================================ 
+sectionLabel("VISUAL SYSTEMS", 0) 
+mkToggle("ESP ROLES & OUTLINES", 1, function(state) 	
+    espEnabled = state 	
+    for _, g in pairs(activeEsp) do 		
+        local l = g:FindFirstChildOfClass("TextLabel"); if l then l.Visible = state end 	
+    end 	
+    for _, o in pairs(activeOutlines) do o.Enabled = state end 
+end) 
+mkToggle("DROPPED GUN ESP", 2, function(s) gunEspEnabled = s end) 
+mkToggle("ANTI-FLING SHIELD", 3, function(s) antiFlingEnabled = s end) 
 
-local SpeedInput = Instance.new("TextBox")
-SpeedInput.Size = UDim2.new(1, 0, 0, 30)
-SpeedInput.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-SpeedInput.PlaceholderText = "ENTER WALKSPEED (DEFAULT 16)..."
-SpeedInput.Font = Enum.Font.Code
-SpeedInput.TextSize = 9
-SpeedInput.TextColor3 = Color3.fromRGB(255, 255, 255)
-SpeedInput.LayoutOrder = 5
-SpeedInput.Parent = Container
-Instance.new("UIStroke").Parent = SpeedInput
+sectionLabel("MOVEMENT & PHYSICS", 4) 
+local SpeedInput = Instance.new("TextBox") 
+SpeedInput.Size = UDim2.new(1, 0, 0, 30) 
+SpeedInput.BackgroundColor3 = C_BG2 
+SpeedInput.PlaceholderText = " walkspeed (default 16)" 
+SpeedInput.Font = Enum.Font.RobotoMono 
+SpeedInput.TextSize = 11 
+SpeedInput.TextColor3 = C_WHITE 
+SpeedInput.PlaceholderColor3 = C_WHITE 
+SpeedInput.LayoutOrder = 5 
+SpeedInput.ZIndex = 3 
+SpeedInput.Parent = Container 
+corner(SpeedInput, 7) 
+stroke(SpeedInput, Color3.fromRGB(120,80,45), 1) 
 
-local SpeedButton = Instance.new("TextButton")
-SpeedButton.Size = UDim2.new(1, 0, 0, 30)
-SpeedButton.BackgroundColor3 = Color3.fromRGB(20, 45, 20)
-SpeedButton.Text = "UPDATE WALKSPEED"
-SpeedButton.Font = Enum.Font.Code
-SpeedButton.TextSize = 10
-SpeedButton.TextColor3 = Color3.fromRGB(150, 255, 150)
-SpeedButton.LayoutOrder = 6
-SpeedButton.Parent = Container
-Instance.new("UIStroke").Parent = SpeedButton
+local SpeedBtn = Instance.new("TextButton") 
+SpeedBtn.Size = UDim2.new(1, 0, 0, 30) 
+SpeedBtn.BackgroundColor3 = Color3.fromRGB(18, 46, 18) 
+SpeedBtn.Text = " UPDATE WALKSPEED" 
+SpeedBtn.Font = Enum.Font.RobotoMono 
+SpeedBtn.TextSize = 11 
+SpeedBtn.TextXAlignment = Enum.TextXAlignment.Left 
+SpeedBtn.TextColor3 = C_GREEN 
+SpeedBtn.TextStrokeTransparency = 0
+SpeedBtn.TextStrokeColor3 = C_BLACK
+SpeedBtn.LayoutOrder = 6 
+SpeedBtn.ZIndex = 3 
+SpeedBtn.Parent = Container 
+corner(SpeedBtn, 7) 
+stroke(SpeedBtn, Color3.fromRGB(35,80,35), 1) 
+SpeedBtn.MouseButton1Click:Connect(function() 	
+    local v = tonumber(SpeedInput.Text) 	
+    if v and v >= 0 then 		
+        customWalkSpeed = v 		
+        SpeedBtn.Text = " SET TO " .. v 
+        appendLog("WalkSpeed updated to: " .. v) 
+        task.delay(1.5, function() SpeedBtn.Text = " UPDATE WALKSPEED" end) 	
+    else 		
+        SpeedBtn.Text = " INVALID NUMBER" 		
+        task.delay(1.5, function() SpeedBtn.Text = " UPDATE WALKSPEED" end) 	
+    end 
+end) 
 
-SpeedButton.MouseButton1Click:Connect(function()
-	local numericVal = tonumber(SpeedInput.Text)
-	if numericVal and numericVal >= 0 then
-		customWalkSpeed = numericVal
-		SpeedButton.Text = "WALKSPEED SET TO: " .. tostring(numericVal)
-		task.delay(1.5, function() SpeedButton.Text = "UPDATE WALKSPEED" end)
-	else
-		SpeedButton.Text = "INVALID NUMBER INPUT"
-		task.delay(1.5, function() SpeedButton.Text = "UPDATE WALKSPEED" end)
-	end
-end)
+local noclipConn = nil 
+mkAction("INSTANT NOCLIP", 6.1, function(btn) 	
+    if noclipConn then noclipConn:Disconnect() end 	
+    noclipConn = RunService.Stepped:Connect(function() 		
+        local c = localPlayer.Character 		
+        if c then for _, p in ipairs(c:GetDescendants()) do if p:IsA("BasePart") then p.CanCollide = false end end end 	
+    end) 	
+    btn.Text = " NOCLIP ACTIVE" 	
+    btn.TextColor3 = C_YELLOW 
+    appendLog("Noclip script attached.") 
+    task.delay(1.5, function() btn.Text = " INSTANT NOCLIP" btn.TextColor3 = C_WHITE end) 
+end) 
 
-local noclipConnection = nil
-createActionButton("INSTANT NOCLIP", 6.1, function(btn)
-	if noclipConnection then noclipConnection:Disconnect() end
-	noclipConnection = RunService.Stepped:Connect(function()
-		local char = localPlayer.Character
-		if char then
-			for _, part in ipairs(char:GetDescendants()) do
-				if part:IsA("BasePart") then part.CanCollide = false end
-			end
-		end
-	end)
-	btn.Text = "NOCLIP ACTIVATED"
-	btn.TextColor3 = Color3.fromRGB(255, 215, 0)
-	task.delay(1.5, function() btn.Text = "INSTANT NOCLIP" btn.TextColor3 = Color3.fromRGB(255, 255, 255) end)
-end)
+mkAction("RE-ENABLE COLLISION", 6.2, function(btn) 	
+    if noclipConn then noclipConn:Disconnect(); noclipConn = nil end 	
+    local c = localPlayer.Character 	
+    if c then 		
+        for _, p in ipairs(c:GetDescendants()) do 			
+            if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then p.CanCollide = true end 		
+        end 	
+    end 	
+    btn.Text = " COLLISION RESTORED" 	
+    btn.TextColor3 = C_GREEN 
+    appendLog("Collisions restored globally.") 
+    task.delay(1.5, function() btn.Text = " RE-ENABLE COLLISION" btn.TextColor3 = C_WHITE end) 
+end) 
 
-createActionButton("RE-ENABLE COLLISION", 6.2, function(btn)
-	if noclipConnection then
-		noclipConnection:Disconnect()
-		noclipConnection = nil
-	end
-	local char = localPlayer.Character
-	if char then
-		for _, part in ipairs(char:GetDescendants()) do
-			if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then 
-				part.CanCollide = true 
-			end
-		end
-	end
-	btn.Text = "COLLISION RE-ENABLED"
-	btn.TextColor3 = Color3.fromRGB(150, 255, 150)
-	task.delay(1.5, function() btn.Text = "RE-ENABLE COLLISION" btn.TextColor3 = Color3.fromRGB(255, 255, 255) end)
-end)
+sectionLabel("ADVANCED AIM ASSIST", 7) 
+mkToggle("LOCK-ON MURDERER", 8, function(s) camLockEnabled = s end) 
+mkToggle("SHOW AIM SCAN LINE", 8.1, function(s) aimViewerEnabled = s end) 
 
-local CamLockSectionLabel = Instance.new("TextLabel")
-CamLockSectionLabel.Size = UDim2.new(1, 0, 0, 18)
-CamLockSectionLabel.BackgroundTransparency = 1
-CamLockSectionLabel.Text = "─── ADVANCED AIM ASSIST ───"
-CamLockSectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
-CamLockSectionLabel.Font = Enum.Font.Code
-CamLockSectionLabel.TextSize = 9
-CamLockSectionLabel.LayoutOrder = 7
-CamLockSectionLabel.Parent = Container
+local SmoothBtn = Instance.new("TextButton") 
+SmoothBtn.Size = UDim2.new(1, 0, 0, 30) 
+SmoothBtn.BackgroundColor3 = Color3.fromRGB(18, 18, 38) 
+SmoothBtn.Text = " TRACKING SMOOTHNESS: " .. smoothnessLevel 
+SmoothBtn.Font = Enum.Font.RobotoMono 
+SmoothBtn.TextSize = 11 
+SmoothBtn.TextXAlignment = Enum.TextXAlignment.Left 
+SmoothBtn.TextColor3 = Color3.fromRGB(160,160,255) 
+SmoothBtn.TextStrokeTransparency = 0
+SmoothBtn.TextStrokeColor3 = C_BLACK
+SmoothBtn.LayoutOrder = 9 
+SmoothBtn.ZIndex = 3 
+SmoothBtn.Parent = Container 
+corner(SmoothBtn, 7) 
+stroke(SmoothBtn, Color3.fromRGB(55,55,110), 1) 
+SmoothBtn.MouseButton1Click:Connect(function() 	
+    smoothnessLevel = smoothnessLevel % 10 + 1 	
+    SmoothBtn.Text = " TRACKING SMOOTHNESS: " .. smoothnessLevel 
+    appendLog("Smoothness level adjusted to " .. smoothnessLevel) 
+end) 
 
-createToggle("LOCK-ON MURDERER", 8, function(state)
-	camLockEnabled = state
-end)
+local PredBtn = Instance.new("TextButton") 
+PredBtn.Size = UDim2.new(1, 0, 0, 30) 
+PredBtn.BackgroundColor3 = Color3.fromRGB(30, 18, 38) 
+PredBtn.Text = " AIM LEAD PREDICTION: " .. predictionLevel 
+PredBtn.Font = Enum.Font.RobotoMono 
+PredBtn.TextSize = 11 
+PredBtn.TextXAlignment = Enum.TextXAlignment.Left 
+PredBtn.TextColor3 = Color3.fromRGB(210,155,255) 
+PredBtn.TextStrokeTransparency = 0
+PredBtn.TextStrokeColor3 = C_BLACK
+PredBtn.LayoutOrder = 9.1 
+PredBtn.ZIndex = 3 
+PredBtn.Parent = Container 
+corner(PredBtn, 7) 
+stroke(PredBtn, Color3.fromRGB(90,55,115), 1) 
+PredBtn.MouseButton1Click:Connect(function() 	
+    predictionLevel = (predictionLevel >= 5) and 0 or predictionLevel + 1 
+    PredBtn.Text = " AIM LEAD PREDICTION: " .. predictionLevel 
+    appendLog("Aim Lead adjusted to " .. predictionLevel) 
+end) 
 
-createToggle("SHOW AIMBOT SCANNER LINE", 8.1, function(state)
-	aimViewerEnabled = state
-end)
+sectionLabel("UTILITIES", 10) 
+mkAction("TELEPORT TO GUN", 11, function(btn) 	
+    if not cachedDroppedGun then 		
+        btn.Text = " GUN NOT DROPPED" 		
+        btn.TextColor3 = C_RED 		
+        task.delay(2, function() btn.Text = " TELEPORT TO GUN" btn.TextColor3 = C_WHITE end) 		
+        return 	
+    end 	
+    local hrp = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart") 	
+    if hrp then 		
+        local orig = hrp.CFrame 		
+        safeTeleport(cachedDroppedGun.CFrame * CFrame.new(0,1,0)) 		
+        btn.Text = " RETURNING..." 
+        appendLog("Teleporting to dropped gun.") 
+        task.wait(0.3); safeTeleport(orig) 		
+        task.delay(1.5, function() btn.Text = " TELEPORT TO GUN" end) 	
+    end 
+end) 
 
-local SmoothCycleBtn = Instance.new("TextButton")
-SmoothCycleBtn.Size = UDim2.new(1, 0, 0, 30)
-SmoothCycleBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 35)
-SmoothCycleBtn.Text = "TRACKING SMOOTHNESS: " .. tostring(smoothnessLevel)
-SmoothCycleBtn.Font = Enum.Font.Code
-SmoothCycleBtn.TextSize = 10
-SmoothCycleBtn.TextColor3 = Color3.fromRGB(160, 160, 255)
-SmoothCycleBtn.LayoutOrder = 9
-SmoothCycleBtn.Parent = Container
-local SmoothStroke = Instance.new("UIStroke")
-SmoothStroke.Color = Color3.fromRGB(70, 70, 120)
-SmoothStroke.Parent = SmoothCycleBtn
+sectionLabel("WORLD TELEPORTS", 11.05) 
+mkAction("TELEPORT TO LOBBY", 11.2, function(btn) 	
+    local t = Workspace:FindFirstChild("RegularLobby") or Workspace:FindFirstChild("Lobby") or Workspace:FindFirstChild("LobbySpawn") 	
+    if not t then 		
+        for _, o in ipairs(Workspace:GetChildren()) do 			
+            if o:IsA("SpawnLocation") and (o.Name:lower():find("lobby") or o.Name == "SpawnLocation") then t=o;break end 		
+        end 	
+    end 	
+    if t then 		
+        local cf = t:IsA("Model") and (t.PrimaryPart and t.PrimaryPart.CFrame) or t.CFrame 		
+        if cf then 
+            safeTeleport(cf * CFrame.new(0,4,0)) 
+            btn.Text=" TELEPORTED" 
+            appendLog("Teleported to lobby zone.") 
+            task.delay(1.5,function() btn.Text=" TELEPORT TO LOBBY" end) 
+            return 		
+        end 	
+    end 	
+    btn.Text=" NOT FOUND"; task.delay(1.5,function() btn.Text=" TELEPORT TO LOBBY" end) 
+end) 
 
-SmoothCycleBtn.MouseButton1Click:Connect(function()
-	smoothnessLevel = smoothnessLevel + 1
-	if smoothnessLevel > 10 then smoothnessLevel = 1 end
-	SmoothCycleBtn.Text = "TRACKING SMOOTHNESS: " .. tostring(smoothnessLevel)
-end)
+mkAction("TELEPORT TO ACTIVE MAP", 11.3, function(btn) 	
+    local aMap = nil 	
+    for _, f in pairs({Workspace:FindFirstChild("Normal"), Workspace:FindFirstChild("Map"), Workspace:FindFirstChild("Maps")}) do 		
+        if f then for _, c in ipairs(f:GetChildren()) do if c:IsA("Model") and c.Name~="RegularLobby" and c.Name~="Lobby" then aMap=c;break end end end 		
+        if aMap then break end 	
+    end 	
+    if not aMap then 		
+        for _, d in ipairs(Workspace:GetChildren()) do 			
+            if d:IsA("Model") and d:FindFirstChild("Spawns") and d.Name~="RegularLobby" and d.Name~="Lobby" then aMap=d;break end 		
+        end 	
+    end 	
+    if aMap then 		
+        local sp = aMap:FindFirstChild("Spawns",true) or aMap:FindFirstChild("Spawn",true) 		
+        local tp = sp and sp:FindFirstChildWhichIsA("BasePart",true) or aMap:FindFirstChildWhichIsA("BasePart",true) 		
+        if tp then 
+            safeTeleport(tp.CFrame*CFrame.new(0,4,0)) 
+            btn.Text=" TP: "..aMap.Name:upper() 
+            appendLog("Teleported to map: " .. aMap.Name:upper()) 
+            task.delay(1.5,function() btn.Text=" TELEPORT TO ACTIVE MAP" end) 
+            return 		
+        end 	
+    end 	
+    btn.Text=" NO MAP FOUND"; task.delay(1.5,function() btn.Text=" TELEPORT TO ACTIVE MAP" end) 
+end) 
 
-local PredictCycleBtn = Instance.new("TextButton")
-PredictCycleBtn.Size = UDim2.new(1, 0, 0, 30)
-PredictCycleBtn.BackgroundColor3 = Color3.fromRGB(35, 20, 35)
-PredictCycleBtn.Text = "AIM LEAD PREDICTION: " .. tostring(predictionLevel)
-PredictCycleBtn.Font = Enum.Font.Code
-PredictCycleBtn.TextSize = 10
-PredictCycleBtn.TextColor3 = Color3.fromRGB(255, 160, 255)
-PredictCycleBtn.LayoutOrder = 9.1
-PredictCycleBtn.Parent = Container
-local PredictStroke = Instance.new("UIStroke")
-PredictStroke.Color = Color3.fromRGB(120, 70, 120)
-PredictStroke.Parent = PredictCycleBtn
+sectionLabel("PLAYER WATCH", 12) 
+local SelectorButton = Instance.new("TextButton") 
+local DropdownFrame = Instance.new("Frame") 
+local DropdownScroll = Instance.new("ScrollingFrame") 
+local DropdownList = Instance.new("UIListLayout") 
 
-PredictCycleBtn.MouseButton1Click:Connect(function()
-	predictionLevel = predictionLevel + 1
-	if predictionLevel > 5 then predictionLevel = 0 end
-	PredictCycleBtn.Text = "AIM LEAD PREDICTION: " .. tostring(predictionLevel)
-end)
+SelectorButton.Size = UDim2.new(1,0,0,30) 
+SelectorButton.BackgroundColor3 = C_BG2 
+SelectorButton.Text = " SELECT PLAYER: [NONE]" 
+SelectorButton.Font = Enum.Font.RobotoMono 
+SelectorButton.TextSize = 10 
+SelectorButton.TextXAlignment = Enum.TextXAlignment.Left 
+SelectorButton.TextColor3 = C_YELLOW 
+SelectorButton.TextStrokeTransparency = 0
+SelectorButton.TextStrokeColor3 = C_BLACK
+SelectorButton.LayoutOrder = 13 
+SelectorButton.ZIndex = 3 
+SelectorButton.Parent = Container 
+corner(SelectorButton, 7) 
+stroke(SelectorButton, Color3.fromRGB(75,58,8), 1) 
 
-local UtilitySectionLabel = Instance.new("TextLabel")
-UtilitySectionLabel.Size = UDim2.new(1, 0, 0, 18)
-UtilitySectionLabel.BackgroundTransparency = 1
-UtilitySectionLabel.Text = "─── UTILITIES & RADAR ───"
-UtilitySectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
-UtilitySectionLabel.Font = Enum.Font.Code
-UtilitySectionLabel.TextSize = 9
-UtilitySectionLabel.LayoutOrder = 10
-UtilitySectionLabel.Parent = Container
+DropdownFrame.Size = UDim2.new(1,0,0,85) 
+DropdownFrame.BackgroundColor3 = C_BG 
+DropdownFrame.Visible = false 
+DropdownFrame.LayoutOrder = 14 
+DropdownFrame.ZIndex = 3 
+DropdownFrame.Parent = Container 
+corner(DropdownFrame, 7) 
+stroke(DropdownFrame, Color3.fromRGB(55,38,8), 1) 
 
-createActionButton("TELEPORT TO GUN", 11, function(btn)
-	if not cachedDroppedGun then
-		btn.Text = "THE GUN IS NOT DROPPED"
-		btn.TextColor3 = Color3.fromRGB(221, 29, 29)
-		task.delay(2, function() btn.Text = "TELEPORT TO GUN" btn.TextColor3 = Color3.fromRGB(255, 255, 255) end)
-		return
-	end
-	
-	local myHrp = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
-	if myHrp and cachedDroppedGun then
-		local orig = myHrp.CFrame
-		safeTeleport(cachedDroppedGun.CFrame * CFrame.new(0, 1, 0))
-		btn.Text = "GUN ACQUIRED!"
-		task.wait(0.3)
-		safeTeleport(orig)
-		btn.Text = "RETURNED TO SAFETY"
-		task.delay(1.5, function() btn.Text = "TELEPORT TO GUN" end)
-	end
-end)
+DropdownScroll.Size = UDim2.new(1,-6,1,-6) 
+DropdownScroll.Position = UDim2.new(0,3,0,3) 
+DropdownScroll.BackgroundTransparency = 1 
+DropdownScroll.ScrollBarThickness = 3 
+DropdownScroll.ScrollBarImageColor3 = C_ORANGE 
+DropdownScroll.ZIndex = 4 
+DropdownScroll.Parent = DropdownFrame 
+DropdownList.Padding = UDim.new(0,3) 
+DropdownList.Parent = DropdownScroll 
 
-local WorldSectionLabel = Instance.new("TextLabel")
-WorldSectionLabel.Size = UDim2.new(1, 0, 0, 18)
-WorldSectionLabel.BackgroundTransparency = 1
-WorldSectionLabel.Text = "─── WORLD TELEPORTS ───"
-WorldSectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
-WorldSectionLabel.Font = Enum.Font.Code
-WorldSectionLabel.TextSize = 9
-WorldSectionLabel.LayoutOrder = 11
-WorldSectionLabel.Parent = Container
+local SpecBtn, SpecSk 
+local ViewBtn, ViewSk 
 
-createActionButton("TELEPORT TO LOBBY", 11.1, function(btn)
-	local lobbyTarget = Workspace:FindFirstChild("RegularLobby") or Workspace:FindFirstChild("Lobby") or Workspace:FindFirstChild("LobbySpawn")
-	if not lobbyTarget then
-		for _, obj in ipairs(Workspace:GetChildren()) do
-			if obj:IsA("SpawnLocation") and (obj.Name:lower():find("lobby") or obj.Name == "SpawnLocation") then
-				lobbyTarget = obj
-				break
-			end
-		end
-	end
-	
-	if lobbyTarget then
-		local landingCFrame = lobbyTarget:IsA("Model") and (lobbyTarget.PrimaryPart and lobbyTarget.PrimaryPart.CFrame) or lobbyTarget.CFrame
-		if landingCFrame then
-			safeTeleport(landingCFrame * CFrame.new(0, 4, 0))
-			btn.Text = "TP'D TO LOBBY!"
-			task.delay(1.5, function() btn.Text = "TELEPORT TO LOBBY" end)
-		end
-	else
-		btn.Text = "LOBBY SPAWN NOT FOUND"
-		task.delay(1.5, function() btn.Text = "TELEPORT TO LOBBY" end)
-	end
-end)
+local function updateDropdownList() 	
+    for _, c in ipairs(DropdownScroll:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end 	
+    local rb = Instance.new("TextButton") 	
+    rb.Size = UDim2.new(1,-6,0,22); rb.BackgroundColor3=Color3.fromRGB(26,50,20) 	
+    rb.Text=" REFRESH LIST"; rb.Font=Enum.Font.RobotoMono; rb.TextSize=10 	
+    rb.TextXAlignment=Enum.TextXAlignment.Left; rb.TextColor3=C_GREEN; rb.ZIndex=5; rb.Parent=DropdownScroll 	
+    corner(rb,4); rb.MouseButton1Click:Connect(updateDropdownList) 	
+    for _, p in ipairs(Players:GetPlayers()) do 		
+        if p ~= localPlayer then 			
+            local pb = Instance.new("TextButton") 			
+            pb.Size=UDim2.new(1,-6,0,22); pb.BackgroundColor3=C_BG2 			
+            pb.Text=" "..p.Name:upper(); pb.Font=Enum.Font.RobotoMono; pb.TextSize=10 			
+            pb.TextXAlignment=Enum.TextXAlignment.Left; pb.TextColor3=C_WHITE; pb.ZIndex=5; pb.Parent=DropdownScroll 			
+            corner(pb,4) 			
+            pb.MouseButton1Click:Connect(function() 				
+                selectedPlayerName = p.Name 				
+                SelectorButton.Text = " TARGET: " .. p.Name:upper() 				
+                DropdownFrame.Visible = false 				
+                if spectateEnabled then spectateEnabled=false 					
+                    if SpecBtn then SpecBtn.Text=" SPECTATE PLAYER [OFF]" SpecBtn.TextColor3=C_WHITE end 					
+                    if SpecSk then SpecSk.Color=Color3.fromRGB(120,80,45) end 				
+                end 				
+                if targetAimViewerEnabled then targetAimViewerEnabled=false 					
+                    if ViewBtn then ViewBtn.Text=" VIEW TARGET AIM [OFF]" ViewBtn.TextColor3=C_WHITE end 					
+                    if ViewSk then ViewSk.Color=Color3.fromRGB(120,80,45) end 				
+                end 			
+            end) 		
+        end 	
+    end 	
+    DropdownScroll.CanvasSize = UDim2.new(0,0,0,DropdownList.AbsoluteContentSize.Y+10) 
+end 
 
-createActionButton("TELEPORT TO ACTIVE MAP", 11.2, function(btn)
-	local activeMap = nil
-	local containers = {Workspace:FindFirstChild("Normal"), Workspace:FindFirstChild("Map"), Workspace:FindFirstChild("Maps")}
-	for _, folder in pairs(containers) do
-		if folder then
-			for _, child in ipairs(folder:GetChildren()) do
-				if child:IsA("Model") and child.Name ~= "RegularLobby" and child.Name ~= "Lobby" then
-					activeMap = child
-					break
-				end
-			end
-		end
-		if activeMap then break end
-	end
-	
-	if not activeMap then
-		for _, desc in ipairs(Workspace:GetChildren()) do
-			if desc:IsA("Model") and desc:FindFirstChild("Spawns") and desc.Name ~= "RegularLobby" and desc.Name ~= "Lobby" then
-				activeMap = desc
-				break
-			end
-		end
-	end
-	
-	if activeMap then
-		local spawnLocation = activeMap:FindFirstChild("Spawns", true) or activeMap:FindFirstChild("Spawn", true)
-		local targetPart = spawnLocation and spawnLocation:FindFirstChildWhichIsA("BasePart", true) or activeMap:FindFirstChildWhichIsA("BasePart", true)
-		
-		if targetPart then
-			safeTeleport(targetPart.CFrame * CFrame.new(0, 4, 0))
-			btn.Text = "TP'D TO: " .. activeMap.Name:upper()
-			task.delay(1.5, function() btn.Text = "TELEPORT TO ACTIVE MAP" end)
-			return
-		end
-	end
-	btn.Text = "NO ACTIVE MAP FOUND"
-	task.delay(1.5, function() btn.Text = "TELEPORT TO ACTIVE MAP" end)
-end)
+SelectorButton.MouseButton1Click:Connect(function() 	
+    DropdownFrame.Visible = not DropdownFrame.Visible 	
+    if DropdownFrame.Visible then updateDropdownList() end 
+end) 
 
-local PlayerSectionLabel = Instance.new("TextLabel")
-PlayerSectionLabel.Size = UDim2.new(1, 0, 0, 18)
-PlayerSectionLabel.BackgroundTransparency = 1
-PlayerSectionLabel.Text = "─── PLAYER TELEPORTS & WATCH ───"
-PlayerSectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
-PlayerSectionLabel.Font = Enum.Font.Code
-PlayerSectionLabel.TextSize = 9
-PlayerSectionLabel.LayoutOrder = 12
-PlayerSectionLabel.Parent = Container
+SpecBtn, SpecSk = mkToggle("SPECTATE PLAYER", 15, function(state) 	
+    if selectedPlayerName == "" and state then 		
+        spectateEnabled = false 		
+        SpecBtn.Text=" SELECT A PLAYER FIRST"; SpecBtn.TextColor3=C_RED; SpecSk.Color=C_RED 		
+        task.delay(1.5, function() SpecBtn.Text=" SPECTATE PLAYER [OFF]" SpecBtn.TextColor3=C_WHITE SpecSk.Color=Color3.fromRGB(120,80,45) end) 		
+        return 	
+    end 	
+    spectateEnabled = state 	
+    if not state then 		
+        local myHum = localPlayer.Character and localPlayer.Character:FindFirstChildOfClass("Humanoid") 		
+        if myHum then camera.CameraSubject = myHum end 	
+    end 
+end) 
 
-local SelectorButton = Instance.new("TextButton")
-local DropdownFrame = Instance.new("Frame")
-local DropdownScroll = Instance.new("ScrollingFrame")
-local DropdownList = Instance.new("UIListLayout")
+ViewBtn, ViewSk = mkToggle("VIEW TARGET AIM", 15.1, function(state) 	
+    if selectedPlayerName == "" and state then 		
+        targetAimViewerEnabled = false 		
+        ViewBtn.Text=" SELECT A PLAYER FIRST"; ViewBtn.TextColor3=C_RED; SpecSk.Color=C_RED 		
+        task.delay(1.5, function() ViewBtn.Text=" VIEW TARGET AIM [OFF]" ViewBtn.TextColor3=C_WHITE ViewSk.Color=Color3.fromRGB(120,80,45) end) 		
+        return 	
+    end 	
+    targetAimViewerEnabled = state 
+end) 
 
-SelectorButton.Size = UDim2.new(1, 0, 0, 30)
-SelectorButton.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-SelectorButton.Text = "SELECT PLAYER: [NONE]"
-SelectorButton.Font = Enum.Font.Code
-SelectorButton.TextSize = 9
-SelectorButton.TextColor3 = Color3.fromRGB(255, 255, 100)
-SelectorButton.LayoutOrder = 13
-SelectorButton.Parent = Container
-Instance.new("UIStroke").Parent = SelectorButton
+mkAction("TELEPORT TO SELECTED PLAYER", 16, function(btn) 	
+    local tp = Players:FindFirstChild(selectedPlayerName) 	
+    local hrp = tp and tp.Character and tp.Character:FindFirstChild("HumanoidRootPart") 	
+    if hrp then 		
+        safeTeleport(hrp.CFrame * CFrame.new(0,0,3)) 		
+        btn.Text = " TP TO " .. tp.Name:upper() 		
+        task.delay(1.5, function() btn.Text = " TELEPORT TO SELECTED PLAYER" end) 	
+    end 
+end) 
 
-DropdownFrame.Size = UDim2.new(1, 0, 0, 85)
-DropdownFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
-DropdownFrame.Visible = false
-DropdownFrame.LayoutOrder = 14
-DropdownFrame.Parent = Container
-Instance.new("UIStroke").Parent = DropdownFrame
+sectionLabel("TARGET FLING", 17) 
+local FlingInput = Instance.new("TextBox") 
+FlingInput.Size=UDim2.new(1,0,0,30); FlingInput.BackgroundColor3=C_BG2 
+FlingInput.PlaceholderText=" type username to fling..."; FlingInput.Font=Enum.Font.RobotoMono 
+FlingInput.TextSize=10; FlingInput.TextColor3=C_WHITE; FlingInput.PlaceholderColor3=C_WHITE 
+FlingInput.LayoutOrder=18; FlingInput.ZIndex=3; FlingInput.Parent=Container 
+corner(FlingInput,7); stroke(FlingInput,Color3.fromRGB(120,80,45),1) 
 
-DropdownScroll.Size = UDim2.new(1, -6, 1, -6)
-DropdownScroll.Position = UDim2.new(0, 3, 0, 3)
-DropdownScroll.BackgroundTransparency = 1
-DropdownScroll.ScrollBarThickness = 3
-DropdownScroll.Parent = DropdownFrame
-DropdownList.Padding = UDim.new(0, 4)
-DropdownList.Parent = DropdownScroll
+local FlingBtn = Instance.new("TextButton") 
+FlingBtn.Size=UDim2.new(1,0,0,30); FlingBtn.BackgroundColor3=Color3.fromRGB(50,16,16) 
+FlingBtn.Text=" EXECUTE FLING"; FlingBtn.Font=Enum.Font.RobotoMono; FlingBtn.TextSize=11 
+FlingBtn.TextXAlignment=Enum.TextXAlignment.Left; FlingBtn.TextColor3=Color3.fromRGB(255,130,130) 
+FlingBtn.TextStrokeTransparency = 0
+FlingBtn.TextStrokeColor3 = C_BLACK
+FlingBtn.LayoutOrder=19; FlingBtn.ZIndex=3; FlingBtn.Parent=Container 
+corner(FlingBtn,7); stroke(FlingBtn,Color3.fromRGB(95,25,25),1) 
+FlingBtn.MouseButton1Click:Connect(function() 	
+    if antiFlingEnabled then FlingBtn.Text=" DISABLE ANTI-FLING FIRST"; return end 	
+    local tp=findPartialPlayer(FlingInput.Text) 	
+    if not tp or not tp.Character then FlingBtn.Text=" PLAYER NOT FOUND"; return end 	
+    local myChar=localPlayer.Character 	
+    local myHrp=myChar and myChar:FindFirstChild("HumanoidRootPart") 	
+    local tHrp=tp.Character:FindFirstChild("HumanoidRootPart") 	
+    if myHrp and tHrp then 		
+        FlingBtn.Text=" FLINGING..." 
+        appendLog("Attempting fling target: " .. tp.Name:upper()) 
+        local orig=myHrp.CFrame; local start=os.clock(); local conn 		
+        conn=RunService.Heartbeat:Connect(function() 			
+            pcall(function() 				
+                if os.clock()-start>0.65 or not myHrp or not tHrp then 					
+                    conn:Disconnect(); myHrp.AssemblyLinearVelocity=Vector3.zero 					
+                    myHrp.AssemblyAngularVelocity=Vector3.zero; myChar:PivotTo(orig) 					
+                    FlingBtn.Text=" EXECUTE FLING"; return 				
+                end 				
+                for _, p in ipairs(myChar:GetChildren()) do if p:IsA("BasePart") then p.CanCollide=false end end 				
+                local t2=os.clock()*75 				
+                myChar:PivotTo(CFrame.new(tHrp.Position+Vector3.new(math.sin(t2)*.15,0,math.cos(t2)*.15))) 				
+                myHrp.AssemblyAngularVelocity=Vector3.new(0,30000,0) 				
+                myHrp.AssemblyLinearVelocity=Vector3.new(30000,30000,30000) 			
+            end) 		
+        end) 	
+    end 
+end) 
 
-local SpecToggleBtn, SpecToggleStroke
+sectionLabel("PERFORMANCE & MONITOR", 20) 
 
-local function updateDropdownList()
-	for _, child in ipairs(DropdownScroll:GetChildren()) do if child:IsA("TextButton") then child:Destroy() end end
-	local refreshAction = Instance.new("TextButton")
-	refreshAction.Size = UDim2.new(1, -6, 0, 22)
-	refreshAction.BackgroundColor3 = Color3.fromRGB(35, 60, 35)
-	refreshAction.Text = "REFRESH PLAYER LIST"
-	refreshAction.Font = Enum.Font.Code
-	refreshAction.TextSize = 9
-	refreshAction.TextColor3 = Color3.fromRGB(150, 255, 150)
-	refreshAction.Parent = DropdownScroll
-	refreshAction.MouseButton1Click:Connect(updateDropdownList)
+mkToggle("EXPLOITER DETECTOR", 20.1, function(state, forceReset) 	
+    if state and not Whitelist[localPlayer.Name] then
+        if forceReset then forceReset() end
+        PremiumPrompt.Visible = true
+        return
+    end
 
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= localPlayer then
-			local pBtn = Instance.new("TextButton")
-			pBtn.Size = UDim2.new(1, -6, 0, 22)
-			pBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-			pBtn.Text = p.Name:upper()
-			pBtn.Font = Enum.Font.Code
-			pBtn.TextSize = 9
-			pBtn.TextColor3 = Color3.fromRGB(230, 230, 230)
-			pBtn.Parent = DropdownScroll
-			pBtn.MouseButton1Click:Connect(function()
-				selectedPlayerName = p.Name
-				SelectorButton.Text = "TARGET: " .. p.Name:upper()
-				DropdownFrame.Visible = false
-				
-				if spectateEnabled then
-					spectateEnabled = false
-					if SpecToggleBtn and SpecToggleStroke then
-						SpecToggleBtn.Text = "SPECTATE PLAYER [OFF]"
-						SpecToggleBtn.TextColor3 = Color3.fromRGB(180, 180, 180)
-						SpecToggleStroke.Color = Color3.fromRGB(50, 50, 50)
-					end
-				end
-			end)
-		end
-	end
-	DropdownScroll.CanvasSize = UDim2.new(0, 0, 0, DropdownList.AbsoluteContentSize.Y + 10)
-end
+    detectionEnabled = state 	
+    if not state then 		
+        table.clear(flaggedExploiters) 		
+        table.clear(playerHistory) 	
+    end 
+end) 
 
-SelectorButton.MouseButton1Click:Connect(function()
-	DropdownFrame.Visible = not DropdownFrame.Visible
-	if DropdownFrame.Visible then updateDropdownList() end
-end)
+local function fpsBoostWarning() 	
+    local WF = Instance.new("Frame") 	
+    WF.Size=UDim2.new(0,290,0,0); WF.Position=UDim2.new(0.5,-145,0.4,-85) 	
+    WF.BackgroundColor3=C_BG; WF.BorderSizePixel=0; WF.Active=true 	
+    WF.ClipsDescendants=true; WF.ZIndex=10; WF.Parent=ScreenGui 	
+    corner(WF,12); stroke(WF,C_RED,2); gradient(WF,C_BG2,C_BG,160) 	
+    local t = TweenService:Create(WF, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size=UDim2.new(0,290,0,170)}); t:Play() 	
+    local wt=Instance.new("TextLabel"); wt.Size=UDim2.new(1,0,0,32); wt.BackgroundTransparency=1 	
+    wt.Text="WARNING"; wt.TextColor3=C_RED; wt.Font=Enum.Font.RobotoMono; wt.TextSize=14; wt.ZIndex=11; wt.Parent=WF 	
+    local wb=Instance.new("TextLabel"); wb.Size=UDim2.new(1,-24,0,68); wb.Position=UDim2.new(0,12,0,36) 	
+    wb.BackgroundTransparency=1; wb.TextWrapped=true; wb.Font=Enum.Font.RobotoMono; wb.TextSize=12 	
+    wb.Text="Potato mode cannot be undone without rejoining. Continue?"; wb.TextColor3=C_WHITE; wb.ZIndex=11; wb.Parent=WF 	
+    local yb=Instance.new("TextButton"); yb.Size=UDim2.new(0,118,0,32); yb.Position=UDim2.new(0,12,1,-44) 	
+    yb.BackgroundColor3=Color3.fromRGB(18,46,18); yb.Text="ACTIVATE"; yb.Font=Enum.Font.RobotoMono 	
+    yb.TextSize=12; yb.TextColor3=C_GREEN; yb.ZIndex=11; yb.Parent=WF 	
+    corner(yb,7); stroke(yb,Color3.fromRGB(35,80,35),1) 	
+    local nb=Instance.new("TextButton"); nb.Size=UDim2.new(0,118,0,32); nb.Position=UDim2.new(1,-130,1,-44) 	
+    nb.BackgroundColor3=Color3.fromRGB(48,16,16); nb.Text="CANCEL"; nb.Font=Enum.Font.RobotoMono 	
+    nb.TextSize=12; nb.TextColor3=Color3.fromRGB(255,130,130); nb.ZIndex=11; nb.Parent=WF 	
+    corner(nb,7); stroke(nb,Color3.fromRGB(95,25,25),1) 	
+    local function closeWF() 		
+        local ct=TweenService:Create(WF,TweenInfo.new(0.25,Enum.EasingStyle.Back,Enum.EasingDirection.In),{Size=UDim2.new(0,290,0,0)}) 		
+        ct:Play(); ct.Completed:Wait(); WF:Destroy() 	
+    end 	
+    nb.MouseButton1Click:Connect(function() task.spawn(closeWF) end) 	
+    yb.MouseButton1Click:Connect(function() 		
+        yb.Active=false; task.spawn(closeWF) 		
+        pcall(function() 			
+            settings().Rendering.QualityLevel=Enum.QualityLevel.Level01 			
+            Lighting.GlobalShadows=false; Lighting.FogEnd=9e9 			
+            Lighting.EnvironmentMaps=false; Lighting.EnvironmentSpecularScale=0 			
+            for _, d in ipairs(Workspace:GetDescendants()) do 				
+                if d:IsA("BasePart") then d.Material=Enum.Material.Neon; d.Reflectance=0 				
+                elseif d:IsA("Texture") or d:IsA("Decal") then d:Destroy() 				
+                elseif d:IsA("MeshPart") then d.TextureID=""; d.Material=Enum.Material.Neon 				
+                elseif d:IsA("SpecialMesh") then d.TextureId="" 				
+                elseif d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Smoke") or d:IsA("Sparkles") or d:IsA("Fire") then d.Enabled=false 				
+                elseif d:IsA("Atmosphere") or d:IsA("Sky") or d:IsA("BloomEffect") or d:IsA("BlurEffect") or d:IsA("DepthOfFieldEffect") or d:IsA("SunRaysEffect") then d:Destroy() 				
+                elseif d:IsA("Terrain") then d.Decoration=false; d.WaterWaveSize=0; d.WaterWaveSpeed=0; d.WaterReflectance=0; d.WaterTransparency=0 				
+                end 			
+            end 
+            appendLog("Potato Mode optimization finalized.") 
+        end) 	
+    end) 
+end 
+mkAction("ACTIVATE POTATO MODE", 21, function() fpsBoostWarning() end) 
 
-SpecToggleBtn, SpecToggleStroke = createToggle("SPECTATE PLAYER", 15, function(state)
-	if selectedPlayerName == "" and state == true then
-		spectateEnabled = false
-		SpecToggleBtn.Text = "SELECT A PLAYER FIRST"
-		SpecToggleBtn.TextColor3 = Color3.fromRGB(221, 29, 29)
-		SpecToggleStroke.Color = Color3.fromRGB(221, 29, 29)
-		task.delay(1.5, function()
-			SpecToggleBtn.Text = "SPECTATE PLAYER [OFF]"
-			SpecToggleBtn.TextColor3 = Color3.fromRGB(180, 180, 180)
-			SpecToggleStroke.Color = Color3.fromRGB(50, 50, 50)
-		end)
-		return
-	end
-	spectateEnabled = state
-	if not state then
-		local myChar = localPlayer.Character
-		local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
-		if myHumanoid then
-			camera.CameraSubject = myHumanoid
-		end
-	end
-end)
+-- ============================================================ 
+-- INIT 
+-- ============================================================ 
+task.spawn(function() 	
+    Players.PlayerAdded:Connect(function(p) 		
+        clearHistory(p) 		
+        updateDropdownList() 		
+        applyEspTags(p) 	
+    end) 	
+    Players.PlayerRemoving:Connect(function(p) 		
+        if p.Name == selectedPlayerName then 			
+            selectedPlayerName = ""; SelectorButton.Text = " SELECT PLAYER: [NONE]" 			
+            spectateEnabled = false; targetAimViewerEnabled = false 		
+        end 		
+        playerRoles[p]=nil; playerHistory[p]=nil; flaggedExploiters[p]=nil 		
+        if activeEsp[p] then pcall(function() activeEsp[p]:Destroy() end); activeEsp[p]=nil end 		
+        if activeOutlines[p] then pcall(function() activeOutlines[p]:Destroy() end); activeOutlines[p]=nil end 		
+        updateDropdownList() 	
+    end) 	
+    for _, p in ipairs(Players:GetPlayers()) do applyEspTags(p) end 
+end) 
 
-createActionButton("TELEPORT TO SELECTED PLAYER", 16, function(btn)
-	local targetPlayer = Players:FindFirstChild(selectedPlayerName)
-	local targetHrp = targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-	if targetHrp then
-		safeTeleport(targetHrp.CFrame * CFrame.new(0, 0, 3))
-		btn.Text = "TP'D TO " .. targetPlayer.Name:upper()
-		task.delay(1.5, function() btn.Text = "TELEPORT TO SELECTED PLAYER" end)
-	end
-end)
+-- Drag 
+local dragOn, dragStart, dragPos 
+MainFrame.InputBegan:Connect(function(inp) 	
+    if inp.UserInputType==Enum.UserInputType.MouseButton1 or inp.UserInputType==Enum.UserInputType.Touch then 		
+        dragOn=true; dragStart=inp.Position; dragPos=MainFrame.Position 		
+        inp.Changed:Connect(function() if inp.UserInputState==Enum.UserInputState.End then dragOn=false end end) 	
+    end 
+end) 
+MainFrame.InputChanged:Connect(function(inp) 	
+    if dragOn and (inp.UserInputType==Enum.UserInputType.MouseMovement or inp.UserInputType==Enum.UserInputType.Touch) then 		
+        local d=inp.Position-dragStart 		
+        MainFrame.Position=UDim2.new(dragPos.X.Scale,dragPos.X.Offset+d.X,dragPos.Y.Scale,dragPos.Y.Offset+d.Y) 	
+    end 
+end) 
 
-local FlingSectionLabel = Instance.new("TextLabel")
-FlingSectionLabel.Size = UDim2.new(1, 0, 0, 18)
-FlingSectionLabel.BackgroundTransparency = 1
-FlingSectionLabel.Text = "─── TARGET FLING ───"
-FlingSectionLabel.TextColor3 = Color3.fromRGB(150, 150, 150)
-FlingSectionLabel.Font = Enum.Font.Code
-FlingSectionLabel.TextSize = 9
-FlingSectionLabel.LayoutOrder = 17
-FlingSectionLabel.Parent = Container
-
-local FlingInput = Instance.new("TextBox")
-FlingInput.Size = UDim2.new(1, 0, 0, 30)
-FlingInput.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
-FlingInput.PlaceholderText = "TYPE USERNAME TO FLING..."
-FlingInput.Font = Enum.Font.Code
-FlingInput.TextSize = 9
-FlingInput.TextColor3 = Color3.fromRGB(255, 255, 255)
-FlingInput.LayoutOrder = 18
-FlingInput.Parent = Container
-Instance.new("UIStroke").Parent = FlingInput
-
-local FlingButton = Instance.new("TextButton")
-FlingButton.Size = UDim2.new(1, 0, 0, 30)
-FlingButton.BackgroundColor3 = Color3.fromRGB(50, 20, 20)
-FlingButton.Text = "EXECUTE FLING"
-FlingButton.Font = Enum.Font.Code
-FlingButton.TextSize = 10
-FlingButton.TextColor3 = Color3.fromRGB(255, 150, 150)
-FlingButton.LayoutOrder = 19
-FlingButton.Parent = Container
-Instance.new("UIStroke").Parent = FlingButton
-
-FlingButton.MouseButton1Click:Connect(function()
-	if antiFlingEnabled then FlingButton.Text = "DISABLE ANTI-FLING FIRST" return end
-	local targetPlayer = findPartialPlayer(FlingInput.Text)
-	if not targetPlayer or not targetPlayer.Character then FlingButton.Text = "PLAYER NOT FOUND" return end
-
-	local myChar = localPlayer.Character
-	local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
-	local targetHrp = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-
-	if myHrp and targetHrp then
-		FlingButton.Text = "FLINGING..."
-		local originalPos = myHrp.CFrame
-		local duration = 0.65 
-		local start = os.clock()
-		
-		local flingConnection
-		flingConnection = RunService.Heartbeat:Connect(function()
-			pcall(function()
-				if os.clock() - start > duration or not myHrp or not targetHrp then
-					flingConnection:Disconnect()
-					myHrp.AssemblyLinearVelocity = Vector3.zero
-					myHrp.AssemblyAngularVelocity = Vector3.zero
-					myChar:PivotTo(originalPos)
-					FlingButton.Text = "EXECUTE FLING"
-					return
-				end
-				
-				for _, part in ipairs(myChar:GetChildren()) do
-					if part:IsA("BasePart") then part.CanCollide = false end
-				end
-				
-				local syncTime = os.clock() * 75
-				local positionalOffset = Vector3.new(math.sin(syncTime) * 0.15, 0, math.cos(syncTime) * 0.15)
-				myChar:PivotTo(CFrame.new(targetHrp.Position + positionalOffset))
-				
-				myHrp.AssemblyAngularVelocity = Vector3.new(0, 30000, 0)
-				myHrp.AssemblyLinearVelocity = Vector3.new(30000, 30000, 30000)
-			end)
-		end)
-	end
-end)
-
-task.spawn(function()
-	Players.PlayerAdded:Connect(updateDropdownList)
-	Players.PlayerRemoving:Connect(function(player)
-		if player.Name == selectedPlayerName then 
-			selectedPlayerName = "" 
-			SelectorButton.Text = "SELECT PLAYER: [NONE]" 
-			spectateEnabled = false
-		end
-		playerRoles[player] = nil
-		if activeEsp[player] then pcall(function() activeEsp[player]:Destroy() end) activeEsp[player] = nil end
-		if activeOutlines[player] then pcall(function() activeOutlines[player]:Destroy() end) activeOutlines[player] = nil end
-		updateDropdownList()
-	end)
-	for _, p in ipairs(Players:GetPlayers()) do applyEspTags(p) end
-	Players.PlayerAdded:Connect(applyEspTags)
-end)
-
-local dragToggle, dragStart, startPos
-MainFrame.InputBegan:Connect(function(input)
-	if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
-		dragToggle = true dragStart = input.Position startPos = MainFrame.Position
-		input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragToggle = false end end)
-	end
-end)
-MainFrame.InputChanged:Connect(function(input)
-	if dragToggle and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-		local delta = input.Position - dragStart
-		MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-	end
-end)
-
-print("[MOSHI GUI] Release production bundle built. Everything stable.")
+print("[MOSHI GUI] Interface layer tint fixes implemented successfully.")
